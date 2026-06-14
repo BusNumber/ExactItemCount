@@ -1,0 +1,15 @@
+## Interface: 120005
+## Title: Exact Item Count
+## Notes: Shows how many of an item you own, broken down by item level / crafting quality.
+## Version: 1.0.0
+## Author: BusNumber
+## Category: Inventory
+## IconAtlas: Professions-ChatIcon-Quality-Tier5
+## X-License: GPLv3
+## X-Website: https://github.com/BusNumber/ExactItemCount
+## X-Donate: https://buymeacoffee.com/busnumber
+## SavedVariables: ExactItemCountDB
+
+Core.lua
+Tooltip.lua
+Settings.lua
