@@ -2,7 +2,7 @@
 
 A lightweight World of Warcraft addon that tells you **how many of an item you own — broken down by item level and crafting quality** — right in the item tooltip.
 
-> Currently, for **Midnight, patch 12.0.5** (retail) only.
+> Currently, for **Midnight, patch 12.0.7** (retail) only.
 
 ## Why
 
