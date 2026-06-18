@@ -1,7 +1,7 @@
 ## Interface: 120007
 ## Title: Exact Item Count
 ## Notes: Shows how many of an item you own, broken down by item level / crafting quality.
-## Version: 1.0.1
+## Version: 1.1.0
 ## Author: BusNumber
 ## Category: Inventory
 ## IconAtlas: Professions-ChatIcon-Quality-Tier5
