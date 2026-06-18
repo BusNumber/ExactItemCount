@@ -375,10 +375,15 @@ a given line of code looks the way it does.
   plus `BAG_UPDATE_DELAYED` while the bank is open (it covers the bank-tab bag IDs
   then); `BANKFRAME_CLOSED` just clears the open flag — it's **known to fire twice**,
   so the handler must stay idempotent. Equipped — `PLAYER_ENTERING_WORLD` +
-  `PLAYER_EQUIPMENT_CHANGED` (fires per slot on any wear/remove/swap). `PLAYERBANKSLOTS_CHANGED`
-  is **legacy** (pre-rework main-bank slots only) — don't use it. A full rebuild per
-  scan is fine; the slot count is tiny. SavedVariables init happens at `ADDON_LOADED`
-  (arg == addon name), the earliest the global is safe.
+  `BAG_UPDATE_DELAYED` + `PLAYER_EQUIPMENT_CHANGED` (the last fires per slot on any
+  wear/remove/swap). The `BAG_UPDATE_DELAYED` scan is the **post-login self-heal** and is
+  not optional: the login PEW fires before the client has the character's item data (its
+  scan reads nothing), and `PLAYER_EQUIPMENT_CHANGED` does **not** fire on login (gear
+  isn't "changing", it's just present) — so equipped piggybacks on the same delayed event
+  that already fixes bags, or it stays empty until the first manual gear swap.
+  `PLAYERBANKSLOTS_CHANGED` is **legacy** (pre-rework main-bank slots only) — don't use
+  it. A full rebuild per scan is fine; the slot count is tiny. SavedVariables init happens
+  at `ADDON_LOADED` (arg == addon name), the earliest the global is safe.
 - **Equipped slot enumeration**: worn items are read by inventory slot ID, not from a
   container. The set is the standard gear slots
   `INVSLOT_FIRST_EQUIPPED`(1)..`INVSLOT_LAST_EQUIPPED`(19) **plus the
@@ -392,8 +397,9 @@ a given line of code looks the way it does.
   `C_TooltipInfo.GetInventoryItem("player", slot)` for the upgrade-track lines. Profession
   equipment reports an `itemEquipLoc` like `INVTYPE_PROFESSION_TOOL`/`_GEAR`, which
   `ns.IsGearEquipLoc` already accepts, so tools get ilvl rows for free. *(In-game check:
-  confirm `PLAYER_EQUIPMENT_CHANGED` fires for the profession-tool slots 20..30; if it
-  doesn't, fold `ScanEquipped` into the `BAG_UPDATE_DELAYED` branch as a fallback.)*
+  confirm `PLAYER_EQUIPMENT_CHANGED` fires for the profession-tool slots 20..30 so a swap
+  updates live; even if it doesn't, the next `BAG_UPDATE_DELAYED` — equipping moves the
+  item out of a bag — rescans equipped anyway, so the count is never wrong for long.)*
 - **Bank tabs are only readable while the bank frame is open**, and an open frame
   doesn't guarantee both bank types are in context: the warband bank opens remotely via
   the Distance Inhibitor item, where the character bank is unreadable. **A scan must

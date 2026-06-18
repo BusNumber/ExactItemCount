@@ -473,9 +473,14 @@ end
 -- while the bank frame is open -- BAG_UPDATE_DELAYED covers the bank-tab bag IDs then
 -- too. BANKFRAME_CLOSED is known to fire twice; clearing a flag is idempotent, so the
 -- quirk is harmless. PLAYERBANKSLOTS_CHANGED is legacy (pre-rework slots) -- unused.
--- Equipped gear rescans on login and on PLAYER_EQUIPMENT_CHANGED (which fires per slot as
--- items are worn/removed/swapped); the scan is a cheap ~30-slot sweep, so a full rebuild
--- per change is fine.
+-- Equipped gear rescans on PLAYER_ENTERING_WORLD, BAG_UPDATE_DELAYED, and
+-- PLAYER_EQUIPMENT_CHANGED (which fires per slot as items are worn/removed/swapped). The
+-- BAG_UPDATE_DELAYED scan is the post-login self-heal: the login PEW fires before the
+-- client has the character's item data (so its scan reads nothing), and
+-- PLAYER_EQUIPMENT_CHANGED does NOT fire on login (gear isn't "changing", it's just
+-- present) -- so without piggybacking on the same delayed event that fixes bags, equipped
+-- would stay empty until the first manual gear swap. The scan is a cheap ~30-slot sweep,
+-- so a full rebuild per change is fine.
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -508,6 +513,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		ScanEquipped()
 	elseif event == "BAG_UPDATE_DELAYED" then
 		ScanBags()
+		ScanEquipped()
 		if bankOpen then
 			ScanBank()
 			ScanWarband()

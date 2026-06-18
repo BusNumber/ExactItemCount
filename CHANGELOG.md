@@ -5,6 +5,13 @@ All notable changes to Exact Item Count are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-06-17
+
+### Fixed
+
+- Under certain conditions, equipped items could be missing from the counts until you
+  changed gear or reloaded. They now appear reliably.
+
 ## [1.1.0] - 2026-06-17
 
 ### Added
@@ -44,6 +51,7 @@ Initial public release. For **Midnight, patch 12.0.5** (retail).
 - **Live tooltip refresh** — holding or releasing the modifier key over an open tooltip
   updates the counts in place.
 
+[1.1.1]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.1.1
 [1.1.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.1.0
 [1.0.1]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.0.1
 [1.0.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.0.0
