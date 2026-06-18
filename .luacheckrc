@@ -52,9 +52,15 @@ read_globals = {
 	"GetNormalizedRealmName",
 	"UnitName",
 
+	-- equipped inventory (legacy globals, still current)
+	"GetInventoryItemID",
+	"GetInventoryItemLink",
+
 	-- Blizzard global strings and misc
 	"CANCEL",
 	"DELETE",
+	"INVSLOT_FIRST_EQUIPPED",
+	"INVSLOT_LAST_EQUIPPED",
 	"ITEM_UPGRADE_TOOLTIP_FORMAT_STRING",
 	"time",                   -- WoW's global time(), not os.time
 }

@@ -14,7 +14,9 @@ local addonName, ns = ...
 local DEFAULTS = {
 	bankMode    = "always",    -- "always" | "modifier" | "never"
 	warbandMode = "always",
+	equippedMode = "always",   -- the current character's worn gear/profession tools
 	altsMode    = "always",
+	altEquipped = true,        -- count other characters' worn gear too (folds into their total)
 	modifier    = "SHIFT",     -- "SHIFT" | "ALT" | "CTRL"
 	suffixMode  = "always",    -- "always" | "modifier": the per-location suffix
 	rowsMode    = "always",    -- "always" | "modifier": the quality/ilvl breakdown rows
@@ -31,6 +33,7 @@ local TRI_STATE = { always = true, modifier = true, never = true }
 local ENUMS = {
 	bankMode    = TRI_STATE,
 	warbandMode = TRI_STATE,
+	equippedMode = TRI_STATE,
 	altsMode    = TRI_STATE,
 	modifier    = { SHIFT = true, ALT = true, CTRL = true },
 	suffixMode  = { always = true, modifier = true },
@@ -293,6 +296,16 @@ local function RegisterPanel()
 		"Items in this character's bank (snapshot taken while the bank is open).")
 	Settings.CreateDropdown(category, Register("warbandMode", "Warband bank"), TriStateOptions,
 		"Items in the account-wide warband bank (snapshot taken while the bank is open).")
+	local equippedInit = Settings.CreateDropdown(category, Register("equippedMode", "Equipped items"),
+		TriStateOptions,
+		"Items currently equipped on this character (gear plus profession tools and accessories).")
+	local altEquippedInit = Settings.CreateCheckbox(category, Register("altEquipped", "Include in count for alts"),
+		"Also count gear worn by your other characters, folded into each one's total."
+			.. " Uncheck to count only their bags and bank.")
+	-- Nest under the Equipped dropdown purely for the sub-item margin. The predicate gates
+	-- enabled state; this option governs alts (not this character's own equipped tri-state),
+	-- so it stays enabled regardless -- hence a constant true.
+	altEquippedInit:SetParentInitializer(equippedInit, function() return true end)
 	Settings.CreateDropdown(category, Register("altsMode", "Other characters"), TriStateOptions,
 		"Items on every other scanned character, bags and bank combined."
 			.. " Manage individual characters on the Characters page.")

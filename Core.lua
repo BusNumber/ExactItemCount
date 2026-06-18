@@ -17,8 +17,9 @@ local addonName, ns = ...
 --     warband = { scannedAt = <epoch>, items = <items> },          -- account bank: account-level
 --     chars = {
 --       ["Name-NormalizedRealm"] = {
---         bags = { scannedAt = <epoch>, items = <items> },
---         bank = { scannedAt = <epoch>, items = <items> },
+--         bags     = { scannedAt = <epoch>, items = <items> },
+--         bank     = { scannedAt = <epoch>, items = <items> },
+--         equipped = { scannedAt = <epoch>, items = <items> },     -- currently-worn gear/tools
 --       },
 --     },
 --     settings = { ... },   -- account-wide display settings; owned by Settings.lua
@@ -42,6 +43,19 @@ for bagID = Enum.BagIndex.Backpack, Enum.BagIndex.ReagentBag do
 	BAG_IDS[#BAG_IDS + 1] = bagID
 end
 
+-- Equipped inventory slots: the standard gear slots (INVSLOT_FIRST_EQUIPPED..LAST, 1-19)
+-- plus the profession/cooking/fishing tool & accessory slots (20-30). Unlike purchased
+-- bank-tab bag IDs (which must be fetched live -- see ReadableBankTabs), inventory slot
+-- IDs are fixed game constants, so a static list is correct; GetInventoryItemID simply
+-- returns nil for an empty or non-existent slot.
+local EQUIPPED_SLOTS = {}
+for slot = INVSLOT_FIRST_EQUIPPED, INVSLOT_LAST_EQUIPPED do
+	EQUIPPED_SLOTS[#EQUIPPED_SLOTS + 1] = slot
+end
+for slot = 20, 30 do
+	EQUIPPED_SLOTS[#EQUIPPED_SLOTS + 1] = slot
+end
+
 -- Hot-path locals.
 local GetContainerNumSlots    = C_Container.GetContainerNumSlots
 local GetContainerItemInfo    = C_Container.GetContainerItemInfo
@@ -50,6 +64,9 @@ local GetDetailedItemLevelInfo = C_Item.GetDetailedItemLevelInfo
 local GetItemInfoInstant      = C_Item.GetItemInfoInstant
 local GetItemNameByID         = C_Item.GetItemNameByID
 local GetBagItemTooltip       = C_TooltipInfo and C_TooltipInfo.GetBagItem
+local GetInventoryItemTooltip = C_TooltipInfo and C_TooltipInfo.GetInventoryItem
+local GetInventoryItemID      = GetInventoryItemID    -- global; (unit, slot) -> itemID|nil
+local GetInventoryItemLink    = GetInventoryItemLink  -- global; (unit, slot) -> hyperlink|nil
 
 -- Equip locations that do NOT count as gear. Non-equippable items return
 -- "INVTYPE_NON_EQUIP_IGNORE" from GetItemInfoInstant -- the token was renamed from
@@ -116,20 +133,51 @@ end
 -- Reused across slots so the scan allocates no per-slot ItemLocation tables.
 local scanLoc = ItemLocation:CreateEmpty()
 
+-- Records one stack into the items snapshot: `qty` of item `id` at effective item level
+-- `ilvl`, with representative hyperlink `link`. Creates the per-item entry and per-ilvl
+-- group on first sight. `fetchTip` is an optional thunk returning the stack's
+-- TooltipData; it is called at most once per *new gear group* (first stack wins) to
+-- parse the upgrade track, which bounds the tooltip-fetch cost to the handful of gear
+-- stacks scanned. Shared by every scan path so the grouping/track logic lives in one
+-- place.
+local function RecordStack(items, id, qty, link, ilvl, fetchTip)
+	local entry = items[id]
+	if not entry then
+		entry = { total = 0, groups = {} }
+		items[id] = entry
+	end
+	entry.total = entry.total + qty
+	entry.link = entry.link or link
+
+	local group = entry.groups[ilvl]
+	if not group then
+		group = { count = 0, link = link }
+		entry.groups[ilvl] = group
+
+		-- Upgrade track, gear only, representative like `link` (first stack seen wins;
+		-- a same-ilvl cross-track collision is rare and tolerated).
+		local _, _, _, equipLoc = GetItemInfoInstant(id)
+		if fetchTip and ns.IsGearEquipLoc(equipLoc) then
+			local tip = fetchTip()
+			local name, step, max = ns.ParseUpgradeTrack(tip and tip.lines)
+			if name then
+				group.track = { name = name, step = step, max = max }
+			end
+		end
+	end
+	group.count = group.count + qty
+end
+
 -- Full scan of a set of containers into a fresh items table. Cheap (a few hundred slots
 -- at most) and only runs on login / after a batch of bag changes / at the bank, so a
 -- wholesale rebuild is plenty fast. Returning a new table lets callers swap snapshots
 -- atomically -- nothing outside the data layer holds a reference to a source store.
 local function ScanContainers(bagIDs)
 	local items = {}
-
 	for _, bagID in ipairs(bagIDs) do
 		for slot = 1, GetContainerNumSlots(bagID) do
 			local info = GetContainerItemInfo(bagID, slot)
 			if info and info.itemID then
-				local id  = info.itemID
-				local qty = info.stackCount or 1
-
 				-- Effective item level for this exact stack. ItemLocation is the
 				-- reliable source for owned items; fall back to parsing the link.
 				scanLoc:SetBagAndSlot(bagID, slot)
@@ -137,39 +185,11 @@ local function ScanContainers(bagIDs)
 				if not ilvl and info.hyperlink then
 					ilvl = GetDetailedItemLevelInfo(info.hyperlink)
 				end
-				ilvl = ilvl or 0
-
-				local entry = items[id]
-				if not entry then
-					entry = { total = 0, groups = {} }
-					items[id] = entry
-				end
-				entry.total = entry.total + qty
-				entry.link = entry.link or info.hyperlink
-
-				local group = entry.groups[ilvl]
-				if not group then
-					group = { count = 0, link = info.hyperlink }
-					entry.groups[ilvl] = group
-
-					-- Upgrade track, gear only, representative like `link` (first stack
-					-- seen wins; a same-ilvl cross-track collision is rare and tolerated).
-					-- Fetching tooltip data once per new group bounds the cost to the
-					-- handful of gear stacks in the containers.
-					local _, _, _, equipLoc = GetItemInfoInstant(id)
-					if GetBagItemTooltip and ns.IsGearEquipLoc(equipLoc) then
-						local tip = GetBagItemTooltip(bagID, slot)
-						local name, step, max = ns.ParseUpgradeTrack(tip and tip.lines)
-						if name then
-							group.track = { name = name, step = step, max = max }
-						end
-					end
-				end
-				group.count = group.count + qty
+				RecordStack(items, info.itemID, info.stackCount or 1, info.hyperlink, ilvl or 0,
+					GetBagItemTooltip and function() return GetBagItemTooltip(bagID, slot) end)
 			end
 		end
 	end
-
 	return items
 end
 
@@ -242,25 +262,54 @@ local function ScanWarband()
 	db.warband = { scannedAt = time(), items = ScanContainers(tabs) }
 end
 
--- Visits every source store as fn(items, tag, altName) -- tag is "bags"/"bank"/"warband"
--- for the current character (altName nil), alts get altName (tag nil) with bags and bank
--- both visited so their containers combine into one per-alt number. Visit order doubles
--- as representative precedence (first non-nil link/track wins downstream): own bags, own
--- bank, warband, then alts sorted by key for determinism.
+-- Currently-worn items (gear plus profession/cooking/fishing tools & accessories) into a
+-- fresh snapshot. Each slot holds a single item, so qty is always 1. Reuses scanLoc via
+-- SetEquipmentSlot for the item-level read; the link/id come from the global inventory
+-- accessors. Always readable for the current character, so (unlike the bank scans) there
+-- is no "keep the old snapshot" guard.
+local function ScanEquipped()
+	local char = EnsureChar()
+	if not char then return end
+	local items = {}
+	for _, slot in ipairs(EQUIPPED_SLOTS) do
+		local id = GetInventoryItemID("player", slot)
+		if id then
+			local link = GetInventoryItemLink("player", slot)
+			scanLoc:SetEquipmentSlot(slot)
+			local ilvl = GetCurrentItemLevel(scanLoc)
+			if not ilvl and link then
+				ilvl = GetDetailedItemLevelInfo(link)
+			end
+			RecordStack(items, id, 1, link, ilvl or 0,
+				GetInventoryItemTooltip and function() return GetInventoryItemTooltip("player", slot) end)
+		end
+	end
+	char.equipped = { scannedAt = time(), items = items }
+end
+
+-- Visits every source store as fn(items, tag, altName) -- tag is
+-- "bags"/"bank"/"equipped"/"warband" for the current character (altName nil), alts get
+-- altName (tag nil) with bags, bank and equipped all visited so they combine into one
+-- per-alt number. Visit order doubles as representative precedence (first non-nil
+-- link/track wins downstream): own bags, own bank, own equipped, warband, then alts
+-- sorted by key for determinism.
 --
 -- `filter` is the display layer's source selection (nil = visit everything):
---   { bags = bool, bank = bool, warband = bool, alts = bool,
---     hiddenChars = { ["Name-NormalizedRealm"] = true } }
--- Falsy flags skip that store wholesale; hiddenChars skips individual alts and must be
--- checked here -- the callback only ever sees the realm-stripped display name, never the
--- full key. Filtering at the iteration root is what keeps "the total equals the sum of
--- everything displayed" true by construction in every aggregate built on top.
+--   { bags = bool, bank = bool, equipped = bool, warband = bool, alts = bool,
+--     altEquipped = bool, hiddenChars = { ["Name-NormalizedRealm"] = true } }
+-- `equipped` gates only the current character's worn gear; `altEquipped` gates whether
+-- alts' worn gear folds into their per-alt number. Falsy flags skip that store wholesale;
+-- hiddenChars skips individual alts and must be checked here -- the callback only ever
+-- sees the realm-stripped display name, never the full key. Filtering at the iteration
+-- root is what keeps "the total equals the sum of everything displayed" true by
+-- construction in every aggregate built on top.
 local function ForEachSourceStore(fn, filter)
 	if not db then return end
 	local me = charKey and db.chars[charKey]
 	if me then
 		if (not filter or filter.bags) and me.bags then fn(me.bags.items, "bags") end
 		if (not filter or filter.bank) and me.bank then fn(me.bank.items, "bank") end
+		if (not filter or filter.equipped) and me.equipped then fn(me.equipped.items, "equipped") end
 	end
 	if (not filter or filter.warband) and db.warband then fn(db.warband.items, "warband") end
 
@@ -283,6 +332,11 @@ local function ForEachSourceStore(fn, filter)
 			local char = db.chars[key]
 			if char.bags then fn(char.bags.items, nil, altName) end
 			if char.bank then fn(char.bank.items, nil, altName) end
+			-- Worn gear folds into the alt's combined per-alt number alongside bags/bank,
+			-- gated by the altEquipped checkbox rather than the own-equipped tri-state.
+			if (not filter or filter.altEquipped) and char.equipped then
+				fn(char.equipped.items, nil, altName)
+			end
 		end
 	end
 end
@@ -306,6 +360,7 @@ end
 local function MergeSources(dst, src)
 	if src.bags then dst.bags = (dst.bags or 0) + src.bags end
 	if src.bank then dst.bank = (dst.bank or 0) + src.bank end
+	if src.equipped then dst.equipped = (dst.equipped or 0) + src.equipped end
 	if src.warband then dst.warband = (dst.warband or 0) + src.warband end
 	if src.alts then
 		local alts = dst.alts
@@ -418,12 +473,16 @@ end
 -- while the bank frame is open -- BAG_UPDATE_DELAYED covers the bank-tab bag IDs then
 -- too. BANKFRAME_CLOSED is known to fire twice; clearing a flag is idempotent, so the
 -- quirk is harmless. PLAYERBANKSLOTS_CHANGED is legacy (pre-rework slots) -- unused.
+-- Equipped gear rescans on login and on PLAYER_EQUIPMENT_CHANGED (which fires per slot as
+-- items are worn/removed/swapped); the scan is a cheap ~30-slot sweep, so a full rebuild
+-- per change is fine.
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("BAG_UPDATE_DELAYED")
 frame:RegisterEvent("BANKFRAME_OPENED")
 frame:RegisterEvent("BANKFRAME_CLOSED")
+frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 frame:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
 		if arg1 ~= addonName then return end
@@ -446,6 +505,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		self:UnregisterEvent("ADDON_LOADED")
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		ScanBags()
+		ScanEquipped()
 	elseif event == "BAG_UPDATE_DELAYED" then
 		ScanBags()
 		if bankOpen then
@@ -458,5 +518,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		ScanWarband()
 	elseif event == "BANKFRAME_CLOSED" then
 		bankOpen = false
+	elseif event == "PLAYER_EQUIPMENT_CHANGED" then
+		ScanEquipped()
 	end
 end)

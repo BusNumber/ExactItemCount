@@ -82,19 +82,23 @@ local function BuildFilter(s)
 	return {
 		bags = true, -- the current character's bags always count; no setting gates them
 		bank = SourceEnabled(s.bankMode, down),
+		equipped = SourceEnabled(s.equippedMode, down),
 		warband = SourceEnabled(s.warbandMode, down),
 		alts = SourceEnabled(s.altsMode, down),
+		altEquipped = s.altEquipped, -- whether alts' worn gear folds into their per-alt count
 		hiddenChars = s.hiddenChars,
 	}, down
 end
 
 -- Location breakdown for one count, pre-colored: " (bags 2 · bank 1 · warband 3 · Liara 1)".
--- Fixed order bags / bank(s) / warband / alts, alts by count descending (name ascending as
--- a stable tiebreak); zero-count locations never appear (the aggregator omits them), so an
--- empty sources table -- and the synthetic owned-0 rows that have none at all -- yields "".
--- The whole "bags N" token renders one step brighter than the rest: "how many on me right
--- now" is one glance, and no bright token anywhere reads as "none on you". Bare bags/bank
--- always mean the current character; alts are name + count only, containers combined.
+-- Fixed order bags / bank(s) / warband / equipped / alts, alts by count descending (name
+-- ascending as a stable tiebreak); zero-count locations never appear (the aggregator omits
+-- them), so an empty sources table -- and the synthetic owned-0 rows that have none at all
+-- -- yields "". The whole "bags N" token renders one step brighter than the rest: "how many
+-- on me right now" is one glance, and no bright token anywhere reads as "none on you".
+-- "equipped" (the current character's worn gear) sits at the dim base like bank/warband.
+-- Bare bags/bank/equipped always mean the current character; alts are name + count only,
+-- containers combined.
 --
 -- `opts` is the per-render display shape; modifier state is already folded in by the
 -- caller, so this function never reads the keyboard:
@@ -124,6 +128,9 @@ local function SourceSuffix(sources, opts)
 		if sources.warband then
 			Add(SUFFIX, "warband " .. tostring(sources.warband))
 		end
+	end
+	if sources.equipped then
+		Add(SUFFIX, "equipped " .. tostring(sources.equipped))
 	end
 	if sources.alts then
 		local names = {}
@@ -381,8 +388,9 @@ local KEY_TO_MOD = {
 -- change the rendered section and the rebuild is skipped.
 local function ModifierMatters(s)
 	return s.bankMode == "modifier" or s.warbandMode == "modifier"
-		or s.altsMode == "modifier" or s.suffixMode == "modifier"
-		or s.rowsMode == "modifier" or s.bankMerge == "modifier"
+		or s.equippedMode == "modifier" or s.altsMode == "modifier"
+		or s.suffixMode == "modifier" or s.rowsMode == "modifier"
+		or s.bankMerge == "modifier"
 		or (s.altsExpandKey and s.altsDetail ~= "all")
 end
 

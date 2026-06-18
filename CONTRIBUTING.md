@@ -58,17 +58,34 @@ The reason this addon exists:
       gold (even if you own 0 of it); every row's location suffix sums exactly to that
       row's count; the rows sum exactly to the grand total.
 
+### Equipped items
+
+- [ ] Hover a piece of gear you're **wearing**: the grand total includes it and an
+      `equipped N` token appears in the suffix, between `warband` and the alts.
+- [ ] Hover an equipped **profession tool/accessory**: it's counted and gets an
+      item-level row like any gear.
+- [ ] Hold a crafted piece at one rank in your bags while **wearing** another rank: two
+      ilvl rows, highest first; the worn rank's row carries `(equipped 1)`; rows sum to
+      the total. Swap the worn piece — `PLAYER_EQUIPMENT_CHANGED` rescans, and an open
+      tooltip updates on the next hover. (Confirm a **profession-tool** swap, slots
+      20–30, also triggers the rescan.)
+
 ### Persistence lifecycle
 
 - [ ] Open and close the bank; walk away — bank counts still show on tooltips.
 - [ ] `/reload` away from the bank — bank counts survive.
-- [ ] Log an alt, then return — the other character's counts appear under its name.
+- [ ] Log an alt, then return — the other character's counts appear under its name
+      (bags, bank, **and** worn gear combined into its per-alt number).
 
 ### Settings
 
-- [ ] **Invariant under filtering** — disable a source (e.g. set Bank to *Never*): the
-      total and every row must drop by exactly that source's amount, and rows must
-      still sum to the total.
+- [ ] **Invariant under filtering** — disable a source (e.g. set Bank, or *Equipped
+      items*, to *Never*): the total and every row must drop by exactly that source's
+      amount, and rows must still sum to the total.
+- [ ] **Alts' equipped checkbox** — with an alt that has worn gear scanned, toggle
+      "Include in count for alts" (the indented sub-item under *Equipped items*): that
+      gear folds into / out of the alt's per-alt number, total still equals the sum.
+      Uncheck it, `/reload`: the unchecked (`false`) state must stick.
 - [ ] **Live refresh** — set a source to "only while held", then hold/release the
       modifier *while a tooltip is open*: counts appear/vanish in place, and mashing
       the key never duplicates the section.

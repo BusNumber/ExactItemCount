@@ -12,14 +12,14 @@ Exact Item Count splits the count by item level and labels each with its craftin
 
 ## What it shows
 
-When you hover an item, a section is added under the normal tooltip. Every count carries a dimmed where-is-it breakdown — your bags, your bank, the warband bank, and each of your other characters by name. (`★n` below stands in for the in-game quality icon.)
+When you hover an item, a section is added under the normal tooltip. Every count carries a dimmed where-is-it breakdown — your bags, your bank, the warband bank, the gear you have equipped, and each of your other characters by name. (`★n` below stands in for the in-game quality icon.)
 
-**Crafted / equippable gear** — total, plus a row per item level (highest first) with its crafting-quality icon. The variant you're hovering is always listed, even if you own none of it:
+**Crafted / equippable gear** — total, plus a row per item level (highest first) with its crafting-quality icon. Worn gear and profession tools/accessories count too, shown with an `equipped` tag. The variant you're hovering is always listed, even if you own none of it:
 
 ```
-Total items owned: 3 (bags 2 · bank 1)
+Total items owned: 3 (bags 2 · equipped 1)
   681 ★5: 0
-  668 ★4: 3 (bags 2 · bank 1)
+  668 ★4: 3 (bags 2 · equipped 1)
 ```
 
 Dropped gear shows its upgrade track instead — the track's first letter plus progress, e.g. Hero 2/6:
@@ -57,21 +57,21 @@ If you own none anywhere, the section collapses to `Total items owned: 0`. And i
 3. The folder name must be **`ExactItemCount`** (it has to match `ExactItemCount.toc`).
 4. Restart WoW, or `/reload` if it's running. Make sure **Exact Item Count** is enabled in the AddOns list on the character-select screen.
 
-That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle locations (always / only while a modifier key is held / never), compact-tooltip modes, and a list of your scanned characters with per-character hide and delete.
+That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle each location — bank, warband bank, equipped items, other characters (always / only while a modifier key is held / never), plus a checkbox for whether to count your alts' equipped gear; compact-tooltip modes; and a list of your scanned characters with per-character hide and delete.
 
 ## Scope (current version)
 
 - ✅ Bags (live), character bank and warband bank (updated whenever you visit a bank)
+- ✅ Equipped items — worn gear plus profession tools and accessories (updated as you change gear)
 - ✅ All of your characters — anything scanned while playing an alt shows up account-wide
 - ✅ Per-item-level breakdown with crafting-quality rank and upgrade-track progress
 - ✅ Where-it-is breakdown on every count
 - ✅ Settings (display-only filtering — what's counted on screen, never what's cached)
 - ⬜ Amount of gold *(planned)*
-- ⬜ Equipped items *(planned)*
 
 ## Performance & safety
 
-Light by design: it reads your bags only when their contents change, snapshots your bank and warband bank while the bank window is open, and adds a few lines to tooltips. Snapshots are remembered between sessions (saved in the `ExactItemCountDB` saved variable), which is how bank and alt counts stay available anywhere — even at the mailbox on another character. It performs **read-only** operations and does nothing that could taint Blizzard's secure code.
+Light by design: it reads your bags only when their contents change, rereads your equipped gear when you swap a piece, snapshots your bank and warband bank while the bank window is open, and adds a few lines to tooltips. Snapshots are remembered between sessions (saved in the `ExactItemCountDB` saved variable), which is how bank and alt counts stay available anywhere — even at the mailbox on another character. It performs **read-only** operations and does nothing that could taint Blizzard's secure code.
 
 ## Contributing
 

@@ -24,9 +24,11 @@ Everything in this addon rests on how quality is encoded for different item fami
 
 Counts come from the current character's **bags** (backpack + 4 bags + reagent bag,
 live), the **character bank** and **warband (account) bank** (snapshots taken while the
-bank is open), and **alts** (every character the addon has scanned, bags + bank combined
-per alt). Everything persists in the `ExactItemCountDB` SavedVariable, so bank and alt
-data survive relogs.
+bank is open), the character's **equipped** items (worn gear plus profession/cooking/
+fishing tools & accessories, rescanned on every equipment change), and **alts** (every
+character the addon has scanned, bags + bank + equipped combined per alt). Everything
+persists in the `ExactItemCountDB` SavedVariable, so bank, equipped, and alt data survive
+relogs.
 
 The DB always stays complete; the settings layer filters **display only**. That makes
 every setting instantly reversible — no rescan is needed to undo a filter.
@@ -101,18 +103,23 @@ meaningful.
 ### The location suffix
 
 The total line and each breakdown row carry a dimmed per-location split:
-`645 <star>: 3 (bags 2 · bank 1 · warband 3 · Liara 1)`.
+`645 <star>: 3 (bags 2 · bank 1 · warband 3 · equipped 1 · Liara 1)`.
 
-- Fixed order `bags · bank · warband · alts`, with alts sorted **count descending**.
-  Zero-count locations are omitted.
+- Fixed order `bags · bank · warband · equipped · alts`, with alts sorted **count
+  descending**. Zero-count locations are omitted.
 - Shown whenever the count is above zero, **including single-location** (`(bags 3)`) —
   a no-suffix line never needs interpreting.
 - The whole `bags <n>` token renders one step brighter than the rest of the suffix, so
   "how many on me right now" is one glance and *no bright token* reads as "none on
   you". It stays below the row's primary count. Emphasis ladder: white count > dim row
   text > bags token > suffix base (hexes in `Tooltip.lua`).
-- Bare `bags`/`bank` always mean the character you're on. Alts are **name + count
-  only** (`Liara 140`), realm stripped — same-named alts across realms merge in
+- The `equipped <n>` token (the character's **own** worn gear) sits at the suffix base
+  like bank/warband — only `bags` gets the brighter "on me right now" emphasis, since
+  that token specifically flags loose, grab-and-use inventory; worn gear is a distinct
+  category. Alts' worn gear is not a separate token: it folds into the alt's combined
+  name+count, gated by the `altEquipped` checkbox (see [Settings](#settings)).
+- Bare `bags`/`bank`/`equipped` always mean the character you're on. Alts are **name +
+  count only** (`Liara 140`), realm stripped — same-named alts across realms merge in
   display; the DB key keeps the realm.
 - **Source-major lines** (`Bags: N` per location, the way inventory addons usually
   render it) are rejected: they re-ambiguate the per-variant counts this addon exists
@@ -151,11 +158,17 @@ scans never change with settings.
 
 - **Locations**: the current character's bags are **always counted** — no setting; it's
   the one source whose absence would make every tooltip lie about what's in hand. Bank /
-  Warband bank / Other characters are each one tri-state: *Always show* / *Only while
-  \[modifier\] held* / *Never*. A gated-off source is excluded from **all** displayed
-  numbers (grand total, rows, suffix), so the total-equals-sum invariant survives any
-  combination — the filter is applied at the data-layer iteration root, not in the
-  renderer.
+  Warband bank / Equipped items / Other characters are each one tri-state: *Always show* /
+  *Only while \[modifier\] held* / *Never*. A gated-off source is excluded from **all**
+  displayed numbers (grand total, rows, suffix), so the total-equals-sum invariant
+  survives any combination — the filter is applied at the data-layer iteration root, not
+  in the renderer. *Equipped items* gates only the **current** character's worn gear; a
+  separate **Include in count for alts** checkbox (`altEquipped`, on by default), nested
+  as an indented sub-item under the *Equipped items* dropdown (via `SetParentInitializer`
+  for the margin; always enabled — it governs alts, not this character's own equipped
+  setting), gates whether alts' worn gear folds into their per-alt total. (A boolean, not
+  a tri-state: alts have no per-source suffix tokens to modifier-gate, so the only
+  meaningful choice is in/out.)
 - **Compact tooltip**: modifier key (Shift default / Alt / Ctrl); the location suffix
   and the breakdown rows can each independently be *Always* or *only-while-held*; alts
   detail mode with a *List all while key is held* checkbox (`altsExpandKey`, default
@@ -202,8 +215,9 @@ initializes the DB then calls `ns.InitSettings(db)` — safe because the event f
 after every file's main chunk has run; `ns.GetSettings()` returns nil until then and
 the tooltip layer treats nil as "default behavior".
 
-New sources (e.g. equipped items) plug in behind the `ns.Get`/`ns.GetByName` seams in
-`Core.lua` without changing the tooltip layer.
+New sources (e.g. a guild bank) plug in behind the `ns.Get`/`ns.GetByName` seams in
+`Core.lua` without changing the tooltip layer — equipped items were added exactly this
+way (a `ScanEquipped` snapshot store + one extra visit in `ForEachSourceStore`).
 
 ### DB schema
 
@@ -214,13 +228,15 @@ ExactItemCountDB = {
   warband = { scannedAt = <epoch>, items = <items> },          -- account bank: account-level
   chars = {
     ["Name-NormalizedRealm"] = {
-      bags = { scannedAt = <epoch>, items = <items> },
-      bank = { scannedAt = <epoch>, items = <items> },
+      bags     = { scannedAt = <epoch>, items = <items> },
+      bank     = { scannedAt = <epoch>, items = <items> },
+      equipped = { scannedAt = <epoch>, items = <items> },     -- currently-worn gear/tools
     },
   },
   settings = {                                                 -- account-wide display settings
     hideZero = false, altsExpandKey = false,                   -- booleans (bags: no setting)
-    bankMode/warbandMode/altsMode = "always"|"modifier"|"never",
+    altEquipped = true,                                        -- count alts' worn gear too
+    bankMode/warbandMode/equippedMode/altsMode = "always"|"modifier"|"never",
     modifier = "SHIFT"|"ALT"|"CTRL",
     suffixMode/rowsMode = "always"|"modifier",
     altsDetail = "topn"|"all"|"total", altsTopN = 2,           -- 1..10
@@ -272,18 +288,23 @@ buy invalidation bugs.
 
 - `ns.Get(itemID, filter)` → `nil` (owned nowhere, or nowhere visible) or
   `{ total, link, sources, groups = { [ilvl] = { count, link, track, sources } } }`
-  where every `sources` is `{ bags = n, bank = n, warband = n, alts = { [name] = n } }`
-  with zero-count keys **absent** (so "non-zero only" in the suffix holds by
-  construction). Link/track representatives: first non-nil in visit order — own bags >
-  own bank > warband > alts.
+  where every `sources` is
+  `{ bags = n, bank = n, equipped = n, warband = n, alts = { [name] = n } }` with
+  zero-count keys **absent** (so "non-zero only" in the suffix holds by construction).
+  The `equipped` key is the **current** character's worn gear only; an alt's worn gear
+  is summed into its `alts[name]` entry alongside its bags/bank. Link/track
+  representatives: first non-nil in visit order — own bags > own bank > own equipped >
+  warband > alts.
 - `ns.GetByName(itemID, filter)` → `(name, members, combined)`: `members` is an array
   of `ns.Get` views (plus an `itemID` field) for every name-sibling itemID anywhere in
   the DB; `combined = { total, sources }` summed across them, so the grand-total
   invariant lives in the data layer.
 - `filter` (optional, nil = everything):
-  `{ bags/bank/warband/alts = bool, hiddenChars = { [fullKey] = true } }`, applied
-  inside `ForEachSourceStore` — the one place the full `Name-Realm` key is in hand
-  (callbacks only see realm-stripped display names). `GetByName` threads it through
+  `{ bags/bank/equipped/warband/alts = bool, altEquipped = bool,
+  hiddenChars = { [fullKey] = true } }`, applied inside `ForEachSourceStore` — the one
+  place the full `Name-Realm` key is in hand. `equipped` gates the current character's
+  worn gear; `altEquipped` gates whether each alt's worn gear folds into its per-alt
+  number. (Callbacks only see realm-stripped display names.) `GetByName` threads it through
   **both** its passes so a sibling owned only in a filtered-out source contributes
   neither a row nor a total share. The tooltip layer builds the filter per render
   (`BuildFilter` in `Tooltip.lua`), folding live modifier state into the tri-state
@@ -346,16 +367,33 @@ a given line of code looks the way it does.
   `C_Texture.GetCraftingReagentQualityChatIcon` was removed in 12.0 — don't reach for
   it.)
 - **Item level** per stack: `C_Item.GetCurrentItemLevel(ItemLocation)` (reuse one
-  `ItemLocation` via `:SetBagAndSlot` to avoid allocations), with
-  `C_Item.GetDetailedItemLevelInfo(link)` as fallback for uncached stragglers.
+  `ItemLocation` via `:SetBagAndSlot` for containers or `:SetEquipmentSlot` for worn
+  items, to avoid allocations), with `C_Item.GetDetailedItemLevelInfo(link)` as fallback
+  for uncached stragglers.
 - **Rescan events**: bags — `PLAYER_ENTERING_WORLD` + `BAG_UPDATE_DELAYED` (already
   debounced by Blizzard — no extra throttle); bank + warband — `BANKFRAME_OPENED`,
   plus `BAG_UPDATE_DELAYED` while the bank is open (it covers the bank-tab bag IDs
   then); `BANKFRAME_CLOSED` just clears the open flag — it's **known to fire twice**,
-  so the handler must stay idempotent. `PLAYERBANKSLOTS_CHANGED` is **legacy**
-  (pre-rework main-bank slots only) — don't use it. A full rebuild per scan is fine;
-  the slot count is tiny. SavedVariables init happens at `ADDON_LOADED` (arg == addon
-  name), the earliest the global is safe.
+  so the handler must stay idempotent. Equipped — `PLAYER_ENTERING_WORLD` +
+  `PLAYER_EQUIPMENT_CHANGED` (fires per slot on any wear/remove/swap). `PLAYERBANKSLOTS_CHANGED`
+  is **legacy** (pre-rework main-bank slots only) — don't use it. A full rebuild per
+  scan is fine; the slot count is tiny. SavedVariables init happens at `ADDON_LOADED`
+  (arg == addon name), the earliest the global is safe.
+- **Equipped slot enumeration**: worn items are read by inventory slot ID, not from a
+  container. The set is the standard gear slots
+  `INVSLOT_FIRST_EQUIPPED`(1)..`INVSLOT_LAST_EQUIPPED`(19) **plus the
+  profession/cooking/fishing tool & accessory slots 20..30** (the addon's primary use
+  case is a crafter's equipped profession tool). Unlike purchased bank-tab bag IDs,
+  inventory slot IDs are **fixed game constants**, so a static list is correct here —
+  hardcoding the 20..30 range is the right call, the opposite of the bank-tab rule above;
+  `GetInventoryItemID("player", slot)` returns nil for an empty or non-existent slot. Per
+  slot: `GetInventoryItemID`/`GetInventoryItemLink` for id/link,
+  `scanLoc:SetEquipmentSlot(slot)` + `GetCurrentItemLevel` for ilvl, and
+  `C_TooltipInfo.GetInventoryItem("player", slot)` for the upgrade-track lines. Profession
+  equipment reports an `itemEquipLoc` like `INVTYPE_PROFESSION_TOOL`/`_GEAR`, which
+  `ns.IsGearEquipLoc` already accepts, so tools get ilvl rows for free. *(In-game check:
+  confirm `PLAYER_EQUIPMENT_CHANGED` fires for the profession-tool slots 20..30; if it
+  doesn't, fold `ScanEquipped` into the `BAG_UPDATE_DELAYED` branch as a fallback.)*
 - **Bank tabs are only readable while the bank frame is open**, and an open frame
   doesn't guarantee both bank types are in context: the warband bank opens remotely via
   the Distance Inhibitor item, where the character bank is unreadable. **A scan must
@@ -429,7 +467,6 @@ a given line of code looks the way it does.
 
 These plug in behind the existing seams without changing the tooltip layer:
 
-- Additional source: **equipped** items.
 - Settings polish: formatting / accent-color options; per-container alt detail (at most
   a config-off extra); live re-label of the closed "[modifier] held" dropdowns after a
   modifier change.
