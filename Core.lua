@@ -305,19 +305,24 @@ end
 -- construction in every aggregate built on top.
 local function ForEachSourceStore(fn, filter)
 	if not db then return end
-	local me = charKey and db.chars[charKey]
-	if me then
-		if (not filter or filter.bags) and me.bags then fn(me.bags.items, "bags") end
-		if (not filter or filter.bank) and me.bank then fn(me.bank.items, "bank") end
-		if (not filter or filter.equipped) and me.equipped then fn(me.equipped.items, "equipped") end
+	local me = ResolveCharKey()
+	local char = me and db.chars[me]
+	if char then
+		if (not filter or filter.bags) and char.bags then fn(char.bags.items, "bags") end
+		if (not filter or filter.bank) and char.bank then fn(char.bank.items, "bank") end
+		if (not filter or filter.equipped) and char.equipped then fn(char.equipped.items, "equipped") end
 	end
 	if (not filter or filter.warband) and db.warband then fn(db.warband.items, "warband") end
 
+	-- While the own key is still unresolved (pre-PLAYER_ENTERING_WORLD), self and alts are
+	-- indistinguishable: skip the alt loop rather than misattribute the current character's
+	-- own cached data as an alt of itself. Warband data above is unaffected.
+	if not me then return end
 	if filter and not filter.alts then return end
 	local hidden = filter and filter.hiddenChars
 	local altKeys
 	for key in pairs(db.chars) do
-		if key ~= charKey and not (hidden and hidden[key]) then
+		if key ~= me and not (hidden and hidden[key]) then
 			altKeys = altKeys or {}
 			altKeys[#altKeys + 1] = key
 		end
@@ -329,13 +334,13 @@ local function ForEachSourceStore(fn, filter)
 			-- segment is exact. (Same-named alts on two realms merge -- accepted;
 			-- the key keeps the realm, so disambiguation can come later.)
 			local altName = key:match("^[^-]+") or key
-			local char = db.chars[key]
-			if char.bags then fn(char.bags.items, nil, altName) end
-			if char.bank then fn(char.bank.items, nil, altName) end
+			local alt = db.chars[key]
+			if alt.bags then fn(alt.bags.items, nil, altName) end
+			if alt.bank then fn(alt.bank.items, nil, altName) end
 			-- Worn gear folds into the alt's combined per-alt number alongside bags/bank,
 			-- gated by the altEquipped checkbox rather than the own-equipped tri-state.
-			if (not filter or filter.altEquipped) and char.equipped then
-				fn(char.equipped.items, nil, altName)
+			if (not filter or filter.altEquipped) and alt.equipped then
+				fn(alt.equipped.items, nil, altName)
 			end
 		end
 	end
@@ -373,6 +378,11 @@ local function MergeSources(dst, src)
 		end
 	end
 end
+
+-- Exported for the tooltip layer: the rare same-name+same-tier member collision merges
+-- into one row, and the row's sources must merge the same way its counts do -- otherwise
+-- the location suffix would stop summing to the row's count.
+ns.MergeSources = MergeSources
 
 -- Display layer reads counts through this seam: nil when nothing anywhere owns the item,
 -- else a merged view across every source, built fresh per call (a handful of hash lookups
@@ -425,7 +435,13 @@ end
 -- the sum of everything displayed" lives here, not in the renderer.
 -- `filter` (see ForEachSourceStore) applies to BOTH passes: a sibling owned only in a
 -- filtered-out source must contribute neither a row nor a share of the combined total.
-function ns.GetByName(itemID, filter)
+-- `accept(id, repLink)` (optional) is the caller's membership criterion on top of the
+-- name match -- a rejected id contributes neither a member nor a share of the combined
+-- total, the same all-or-nothing rule the filter follows. The tooltip layer passes "its
+-- quality tier resolves right now", which keeps a same-name item that isn't actually a
+-- quality sibling (duplicate item names exist across expansions) from inflating the
+-- total, and keeps the total equal to the sum of the rows under every cache state.
+function ns.GetByName(itemID, filter, accept)
 	local ids, repLinks = {}, {}
 	ForEachSourceStore(function(items)
 		for id, entry in pairs(items) do
@@ -438,7 +454,8 @@ function ns.GetByName(itemID, filter)
 	local members, combined = {}, { total = 0, sources = {} }
 	if name then
 		for id in pairs(ids) do
-			if (GetItemNameByID(id) or LinkName(repLinks[id])) == name then
+			if (GetItemNameByID(id) or LinkName(repLinks[id])) == name
+				and (not accept or accept(id, repLinks[id])) then
 				local agg = ns.Get(id, filter)
 				if agg then
 					agg.itemID = id

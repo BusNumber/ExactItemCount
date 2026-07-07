@@ -89,6 +89,20 @@ Tier order is **fixed best-first** (gold before silver), so the section is ident
 whichever sibling is hovered; only the emphasis moves — hovered tier gold/white (shown
 even at 0), the rest dim.
 
+Membership in the name join requires the sibling's tier to **resolve at render time**:
+a name-matched itemID whose quality can't be resolved contributes neither a row nor a
+share of the total (the same all-or-nothing rule filtered-out sources follow), so the
+grand total equals the sum of the rows whatever the item cache holds. That drops two
+kinds of id: an unrelated same-name item — duplicate item names exist across
+expansions, and a non-quality namesake must not inflate a reagent's total — and,
+transiently, a genuine sibling owned only by an alt whose item data this session hasn't
+loaded yet. For the latter the addon fires `C_Item.RequestLoadItemDataByID` with the
+stored representative link (the argument is string-typed; once per session per id) so a
+later hover includes it; the hovered item itself is always a member, its tier having
+just resolved from the hovered link. In the rare event two
+itemIDs share both name and tier, they merge into one row — counts **and** location
+sources, so every suffix still sums to its row.
+
 ### Plain items
 
 Food, recipes, lumber, sparks, treatises etc. have neither quality nor item level in
@@ -169,7 +183,10 @@ scans never change with settings.
   setting), gates whether alts' worn gear folds into their per-alt total. (A boolean, not
   a tri-state: alts have no per-source suffix tokens to modifier-gate, so the only
   meaningful choice is in/out.)
-- **Compact tooltip**: modifier key (Shift default / Alt / Ctrl); the location suffix
+- **Compact tooltip**: modifier key (Alt default / Shift / Ctrl — Alt because Shift
+  doubles as the game's compare-items key, which would flip Shift-gated sources on every
+  gear comparison; the default only reaches **fresh installs**, since `InitSettings`
+  fills missing keys only and an existing install keeps its stored choice); the location suffix
   and the breakdown rows can each independently be *Always* or *only-while-held*; alts
   detail mode with a *List all while key is held* checkbox (`altsExpandKey`, default
   off — the label says a generic "key" because checkbox names can't self-heal; see
@@ -178,8 +195,9 @@ scans never change with settings.
   is likewise disabled unless *Top N* is the selected mode; bank/warband suffix
   merging; hide-at-zero ("Hide when total is 0").
 - Modifier state is read live per render **and** a `MODIFIER_STATE_CHANGED` watcher
-  rebuilds a visible tooltip in place via `GameTooltip:RefreshData()`, so holding the
-  key updates an open tooltip without re-hovering.
+  rebuilds the visible tooltips in place via `RefreshData()` (GameTooltip, the chat-link
+  popup, and the two comparison tooltips — see gotchas), so holding the key updates an
+  open tooltip without re-hovering.
 - **Characters page** (canvas subcategory): every scanned char as full `Name-Realm`
   (the one place realm-twins are distinguishable), current char marked and sorted
   first, scan-age per snapshot (`bags 2h ago · bank never`), an eye toggling the
@@ -295,10 +313,17 @@ buy invalidation bugs.
   is summed into its `alts[name]` entry alongside its bags/bank. Link/track
   representatives: first non-nil in visit order — own bags > own bank > own equipped >
   warband > alts.
-- `ns.GetByName(itemID, filter)` → `(name, members, combined)`: `members` is an array
-  of `ns.Get` views (plus an `itemID` field) for every name-sibling itemID anywhere in
-  the DB; `combined = { total, sources }` summed across them, so the grand-total
-  invariant lives in the data layer.
+- `ns.GetByName(itemID, filter, accept)` → `(name, members, combined)`: `members` is an
+  array of `ns.Get` views (plus an `itemID` field) for every name-sibling itemID anywhere
+  in the DB; `combined = { total, sources }` summed across them, so the grand-total
+  invariant lives in the data layer. `accept(id, repLink)` (optional) is the caller's
+  membership criterion on top of the name match: a rejected id contributes neither a
+  member nor a total share — the same all-or-nothing rule the filter follows. The
+  tooltip layer passes "its quality tier resolves right now" (see
+  [Quality goods](#quality-goods-reagents-crafted-consumables)).
+- `ns.MergeSources(dst, src)` → sums one sources table into another (the merge
+  `combined` is built with); the renderer reuses it when same-name+same-tier members
+  collapse into one row.
 - `filter` (optional, nil = everything):
   `{ bags/bank/equipped/warband/alts = bool, altEquipped = bool,
   hiddenChars = { [fullKey] = true } }`, applied inside `ForEachSourceStore` — the one
@@ -325,7 +350,10 @@ a given line of code looks the way it does.
   (`data.hyperlink` / `TooltipUtil.GetDisplayedItem`) can resolve to that *product*
   (owned 0) instead of the recipe. Key the count off `data.id`; if the resolved link's
   itemID disagrees with `data.id`, it's the embedded item — drop the link (it's still
-  needed for quality/ilvl, but only when it matches).
+  needed for quality/ilvl, but only when it matches). Both `id` and `hyperlink` are
+  **optional** in the struct, so an id can arrive with no link at all — every
+  link-consuming call must tolerate nil (the hovered-ilvl lookup only runs with a link
+  in hand).
 - **"Gear" is detected via `itemEquipLoc`** (4th return of
   `C_Item.GetItemInfoInstant`), **not** item class. Profession equipment is item class
   19 (Profession), not Weapon/Armor — keying off class would miss the addon's primary
@@ -418,7 +446,10 @@ a given line of code looks the way it does.
   resolved **lazily at first scan**: the normalized realm is reliable from
   `PLAYER_ENTERING_WORLD` on, **not** at `ADDON_LOADED`, and `BAG_UPDATE_DELAYED` can
   fire before PEW on login (scans bail on a nil key; the PEW rescan covers them). Alt
-  display names strip the realm (character names can't contain `-`).
+  display names strip the realm (character names can't contain `-`). While the key is
+  still nil, `ForEachSourceStore` skips the alt loop entirely — self and alts are
+  indistinguishable then, and the current character's own cached data must not render
+  as an alt of itself.
 - **Midnight "Secret Values"** (`C_Secrets`, new in 12.0): restricts unit
   health/power/cooldowns/auras on tainted paths — **not** bag/container reads.
   `C_Container.GetContainerItemInfo` is `AllowedWhenUntainted`, so this addon is
@@ -431,15 +462,29 @@ a given line of code looks the way it does.
   (the `bags N` token), `SUFFIX 808080` (rest of the location suffix). The suffix
   separator is the UTF-8 middle dot, written `"\194\183"` so it survives encoding
   mishaps.
-- **Live tooltip rebuild on modifier change**: `GameTooltip:RefreshData()` (from
+- **Tooltip post-calls are global**: `AddTooltipPostCall` fires for **every** frame
+  inheriting `GameTooltipTemplate` — the comparison tooltips (ShoppingTooltip1/2), the
+  chat-link popup (ItemRefTooltip), quest-reward embedded tooltips, third-party frames —
+  not just GameTooltip (the wiki's own 10.0.2 example guards with
+  `if tooltip == GameTooltip`). The section deliberately renders on **all** of them:
+  counts are as useful on a linked item as on a bag hover. `tooltip:IsForbidden()` is
+  checked first-line so secure tooltips are never touched. Frames outside the refresh
+  watcher's known set (next bullet) render with whatever key state was live when they
+  opened.
+- **Live tooltip rebuild on modifier change**: `RefreshData()` (from
   `GameTooltipDataMixin`, verified in live FrameXML — it is *not* on the wiki's
   GameTooltip page) re-runs the stored tooltip info through the full pipeline,
   re-firing `TooltipDataProcessor` post-calls with current key state; the rebuild
   **replaces** lines (no duplicate sections) and bails on `AddLine`-built tooltips
-  (which never carry our section). The watcher guards cheapest-first —
+  (which never carry our section). The watcher refreshes every **visible** frame of a
+  fixed known set — GameTooltip, ItemRefTooltip, ShoppingTooltip1/2, each
+  presence-checked for `RefreshData` before the call — and guards cheapest-first:
   `MODIFIER_STATE_CHANGED` fires on every Shift/Alt/Ctrl press anywhere, combat
-  included — and only rebuilds when the changed key maps to the configured modifier
-  *and* some setting actually varies with it.
+  included, and the rebuild only runs when the changed key maps to the configured
+  modifier *and* some setting actually varies with it. The event does **not** fire
+  while an EditBox has keyboard focus (wiki-documented), so a tooltip left open while
+  typing in chat keeps its state until the key is next pressed outside a text field —
+  known, accepted.
 - **`Settings.RegisterAddOnSetting` (post-11.0 signature)** takes
   `(category, variable, variableKey, variableTbl, varType, name, default)` and
   reads/writes `variableTbl[variableKey]` directly — so `db.settings` **must never be

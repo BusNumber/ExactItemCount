@@ -18,8 +18,13 @@ end
 
 local GetItemInfoInstant      = C_Item.GetItemInfoInstant
 local GetDetailedItemLevelInfo = C_Item.GetDetailedItemLevelInfo
+local RequestLoadItemDataByID = C_Item.RequestLoadItemDataByID
 local GetCraftedQuality = C_TradeSkillUI.GetItemCraftedQualityByItemInfo
 local GetReagentQuality = C_TradeSkillUI.GetItemReagentQualityByItemInfo
+
+-- itemIDs whose item data has already been requested this session (see the quality-path
+-- membership predicate below) -- one request per id is plenty to prime the client cache.
+local requestedLoad = {}
 
 -- Crafting quality of an item, as (tier, atlas), or nil when it has no quality.
 -- The two quality systems use different icon art, so the atlas is matched to whichever
@@ -189,7 +194,9 @@ end
 -- gear on an upgrade track is badged "(H 1/6)" instead of the bare "ilvl" prefix; tracks
 -- and crafting ranks are mutually exclusive (crafted gear is recrafted, never upgraded).
 local function ShowGearBreakdown(tooltip, entry, link, hoveredTrack, opts)
-	local hoveredIlvl = GetDetailedItemLevelInfo(link)
+	-- `link` can legitimately be nil (TooltipData's id and hyperlink are both optional);
+	-- without one there is no hovered ilvl to resolve, and the rows below handle that.
+	local hoveredIlvl = link and GetDetailedItemLevelInfo(link)
 	local rows, seen = {}, {}
 	if entry then
 		for ilvl in pairs(entry.groups) do
@@ -238,19 +245,24 @@ end
 -- The star icon alone carries the tier -- these have no meaningful item level. Rows only:
 -- the caller owns the total line (it needs the combined total before any line is added,
 -- for the hide-at-zero check).
-local function ShowQualityBreakdown(tooltip, members, hoveredTier, hoveredAtlas, opts)
+--
+-- `tiers` maps every member's itemID to its resolved { tier, atlas }, filled by the
+-- membership predicate the caller handed ns.GetByName -- an id without a resolvable tier
+-- never became a member, so row membership equals total membership by construction and
+-- no member can be silently dropped here.
+local function ShowQualityBreakdown(tooltip, members, tiers, hoveredTier, hoveredAtlas, opts)
 	local rows = {}
 	for _, m in ipairs(members) do
-		local tier, atlas = GetQuality(m.link, false)
-		if tier then
-			local row = rows[tier]
-			if not row then
-				rows[tier] = { count = m.total, atlas = atlas, sources = m.sources }
-			else
-				-- Two itemIDs sharing name+tier shouldn't exist; keep the counts honest
-				-- (rows must sum to the total) and tolerate the first row's sources.
-				row.count = row.count + m.total
-			end
+		local tier, atlas = tiers[m.itemID][1], tiers[m.itemID][2]
+		local row = rows[tier]
+		if not row then
+			rows[tier] = { count = m.total, atlas = atlas, sources = m.sources }
+		else
+			-- Two itemIDs sharing name+tier shouldn't exist; merge counts AND sources so
+			-- both invariants survive: rows sum to the total, every suffix sums to its
+			-- row. (m.sources is this render's throwaway aggregate -- safe to fold into.)
+			row.count = row.count + m.total
+			ns.MergeSources(row.sources, m.sources)
 		end
 	end
 	if hoveredTier and not rows[hoveredTier] then
@@ -276,6 +288,11 @@ local function ShowQualityBreakdown(tooltip, members, hoveredTier, hoveredAtlas,
 end
 
 local function OnItemTooltip(tooltip, data)
+	-- Post-calls fire for EVERY tooltip inheriting GameTooltipTemplate (comparison and
+	-- chat-link popups, quest rewards, third-party frames) -- deliberately kept: counts
+	-- are as useful on a linked item as on a bag hover. Secure (forbidden) tooltips are
+	-- the exception; addon code must not touch them.
+	if tooltip:IsForbidden() then return end
 	if not data then return end
 
 	-- `data.id` is the canonical id of the item actually being shown -- trust it over the
@@ -325,14 +342,44 @@ local function OnItemTooltip(tooltip, data)
 
 	-- The total is needed before any line is added: a zero total can drop the whole
 	-- section (settings opt-in), and a hidden section must not leave a stray spacer.
-	local entry, members, combined
+	local entry, members, combined, tiers
 	local tier, atlas
 	if not isGear then
 		tier, atlas = GetQuality(link, false)
 	end
 	local total
 	if tier then
-		_, members, combined = ns.GetByName(itemID, filter)
+		-- Membership on top of the name join: a sibling counts only if its tier resolves
+		-- right now, so an id whose stored link can't produce a quality (cold cache -- an
+		-- alt-owned itemID this session has never seen -- or an unrelated same-name item)
+		-- contributes neither a row nor a total share; the data layer applies the same
+		-- all-or-nothing rule it uses for filtered-out sources. Resolved tiers are kept
+		-- so the renderer works from the exact set that built the total. Rejected ids get
+		-- their item data requested -- a later hover then includes them.
+		tiers = {}
+		local function accept(id, repLink)
+			if id == itemID then
+				-- The hovered item opened this section; its tier already resolved from
+				-- the hovered link, so it can never drop out of its own total.
+				tiers[id] = { tier, atlas }
+				return true
+			end
+			local t, a = GetQuality(repLink, false)
+			if t then
+				tiers[id] = { t, a }
+				return true
+			end
+			-- Prime the client item cache so a later hover can resolve this sibling. The
+			-- API's argument is string-typed (link or id), so pass the stored link; if
+			-- there is none, the name join came from GetItemNameByID, meaning the item
+			-- data is already cached and there is nothing to request.
+			if RequestLoadItemDataByID and repLink and not requestedLoad[id] then
+				requestedLoad[id] = true
+				RequestLoadItemDataByID(repLink)
+			end
+			return false
+		end
+		_, members, combined = ns.GetByName(itemID, filter, accept)
 		total = combined.total
 	else
 		entry = ns.Get(itemID, filter)
@@ -361,7 +408,7 @@ local function OnItemTooltip(tooltip, data)
 		-- Quality good: tiers combined across name siblings, one row per tier.
 		AddTotal(tooltip, total, total > 0 and SourceSuffix(combined.sources, opts) or nil)
 		if total > 0 and showRows then
-			ShowQualityBreakdown(tooltip, members, tier, atlas, opts)
+			ShowQualityBreakdown(tooltip, members, tiers, tier, atlas, opts)
 		end
 	else
 		-- Plain item (no quality, no variable level): just the total.
@@ -372,12 +419,13 @@ end
 TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, OnItemTooltip)
 
 -- Live update for the "[modifier] held" settings: when the configured key flips while a
--- tooltip is up, GameTooltip:RefreshData() re-runs the stored tooltip info through the
--- full processing pipeline -- including the post-call above, which re-reads the key state.
+-- tooltip is up, RefreshData() re-runs the stored tooltip info through the full
+-- processing pipeline -- including the post-call above, which re-reads the key state.
 -- The rebuild replaces lines rather than appending, and bails for AddLine-built tooltips
 -- (which never carry this section anyway). Guards run cheapest-first: this event fires on
--- every Shift/Alt/Ctrl press anywhere, combat included. GameTooltip only -- the bag, bank
--- and character-frame hovers all run through it.
+-- every Shift/Alt/Ctrl press anywhere, combat included. It does NOT fire while an EditBox
+-- has keyboard focus, so a tooltip left open while typing in chat keeps its state until
+-- the key is next pressed outside a text field -- known, accepted.
 local KEY_TO_MOD = {
 	LSHIFT = "SHIFT", RSHIFT = "SHIFT",
 	LALT = "ALT", RALT = "ALT",
@@ -394,13 +442,23 @@ local function ModifierMatters(s)
 		or (s.altsExpandKey and s.altsDetail ~= "all")
 end
 
+-- The Blizzard item tooltips the watcher rebuilds in place: the main hover tooltip, the
+-- chat-link popup, and the two comparison tooltips. The section renders on any
+-- GameTooltipTemplate frame, but only these known frames are refreshed on a key flip --
+-- anything else keeps the key state it rendered with when it opened. All four globals
+-- exist before addons load; RefreshData (GameTooltipDataMixin, verified in live FrameXML)
+-- is presence-checked per frame, so a frame without it is simply left alone.
+local WATCHED_TOOLTIPS = { GameTooltip, ItemRefTooltip, ShoppingTooltip1, ShoppingTooltip2 }
+
 local modWatcher = CreateFrame("Frame")
 modWatcher:RegisterEvent("MODIFIER_STATE_CHANGED")
 modWatcher:SetScript("OnEvent", function(_, _, key)
 	local s = ns.GetSettings and ns.GetSettings()
 	if not s or KEY_TO_MOD[key] ~= s.modifier then return end
-	if not (GameTooltip:IsShown() and ModifierMatters(s)) then return end
-	if GameTooltip.RefreshData then
-		GameTooltip:RefreshData()
+	if not ModifierMatters(s) then return end
+	for _, tip in ipairs(WATCHED_TOOLTIPS) do
+		if tip:IsShown() and tip.RefreshData then
+			tip:RefreshData()
+		end
 	end
 end)

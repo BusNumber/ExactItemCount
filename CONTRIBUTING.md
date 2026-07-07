@@ -70,6 +70,16 @@ The reason this addon exists:
       tooltip updates on the next hover. (Confirm a **profession-tool** swap, slots
       20–30, also triggers the rescan.)
 
+### Quality goods (reagents)
+
+- [ ] Hover a two-tier reagent you own at both tiers: one row per tier, best first;
+      every row's suffix sums to its row; rows sum exactly to the grand total.
+- [ ] **Cold cache** — on a fresh login (no `/reload`), hover a reagent whose other
+      tier only an alt owns: the sibling tier's row appears with the alt's count. If
+      the client hasn't loaded that item's data yet, the sibling may be missing from
+      **both** the total and the rows on the first hover and appear on a later
+      re-hover — it must never be counted in the total without its own row.
+
 ### Persistence lifecycle
 
 - [ ] Open and close the bank; walk away — bank counts still show on tooltips.
@@ -88,7 +98,10 @@ The reason this addon exists:
       Uncheck it, `/reload`: the unchecked (`false`) state must stick.
 - [ ] **Live refresh** — set a source to "only while held", then hold/release the
       modifier *while a tooltip is open*: counts appear/vanish in place, and mashing
-      the key never duplicates the section.
+      the key never duplicates the section. Repeat over an open **chat-link** tooltip
+      (click an item link in chat): it must update in place the same way.
+- [ ] **Modifier default** — on a fresh install (no saved settings), the modifier key
+      defaults to Alt; an existing SavedVariables keeps whatever modifier it stored.
 - [ ] **Persistence of falsy values** — check "Hide when total is 0" and "List all
       while key is held", set Bank to *Never*, `/reload`: all three must stick. Then
       uncheck/revert and `/reload` again: the defaults must not resurrect them.

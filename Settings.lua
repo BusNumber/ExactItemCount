@@ -17,7 +17,10 @@ local DEFAULTS = {
 	equippedMode = "always",   -- the current character's worn gear/profession tools
 	altsMode    = "always",
 	altEquipped = true,        -- count other characters' worn gear too (folds into their total)
-	modifier    = "SHIFT",     -- "SHIFT" | "ALT" | "CTRL"
+	modifier    = "ALT",       -- "SHIFT" | "ALT" | "CTRL". Alt, not Shift: Shift doubles as
+	                           -- the game's item-compare key, so a Shift-gated source would
+	                           -- flip every time gear is compared. Only fresh installs get
+	                           -- this -- defaults fill missing keys, a stored choice stays.
 	suffixMode  = "always",    -- "always" | "modifier": the per-location suffix
 	rowsMode    = "always",    -- "always" | "modifier": the quality/ilvl breakdown rows
 	altsDetail  = "topn",      -- "topn" | "all" | "total"
@@ -312,7 +315,8 @@ local function RegisterPanel()
 
 	layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Compact tooltip"))
 	Settings.CreateDropdown(category, Register("modifier", "Modifier key"), ModifierOptions,
-		"The key the \"only while held\" options wait for.")
+		"The key the \"only while held\" options wait for. Note that Shift is also the"
+			.. " game's compare-items key, so it flips while comparing gear.")
 	Settings.CreateDropdown(category, Register("suffixMode", "Location suffix"), TwoStateOptions,
 		"The dimmed per-location split after each count, like (bags 2 \194\183 bank 1).")
 	Settings.CreateDropdown(category, Register("rowsMode", "Quality & item level rows"), TwoStateOptions,
@@ -389,6 +393,8 @@ function ns.InitSettings(database)
 			s[key] = default
 		end
 	end
+	-- NaN passes the type check above and would ride through floor/min/max unchanged.
+	if s.altsTopN ~= s.altsTopN then s.altsTopN = DEFAULTS.altsTopN end
 	s.altsTopN = math.max(1, math.min(10, math.floor(s.altsTopN)))
 	if type(s.hiddenChars) ~= "table" then
 		s.hiddenChars = {}
