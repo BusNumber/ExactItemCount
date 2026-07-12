@@ -34,14 +34,40 @@ Code conventions: the three Lua files share the private addon table via the
 go in `Core.lua` behind the `ns.Get*` seams; `Tooltip.lua` reads only through those
 seams.
 
-## Static checks
+## Static checks & automated tests
 
 WoW globals (`C_Container`, `Enum`, `TooltipDataProcessor`, …) don't exist outside the
-game, so only syntax-level checks are meaningful locally:
+game, but the data and display logic is still testable headless:
 
 - `luac -p <file>` — syntax-only compile pass (or `luajit -bl <file> /dev/null`;
   LuaJIT speaks Lua 5.1, the same dialect as WoW, while modern `luac` is 5.4).
 - `luacheck .` — uses the repo's `.luacheckrc` (which knows the WoW globals).
+- `luajit tests/run_tests.lua` — the headless test suite (below).
+
+CI (`.github/workflows/ci.yml`) runs all three on every push and pull request.
+
+### The test suite (`tests/`)
+
+The suite loads the real `Core.lua`, `Tooltip.lua` **and** `Settings.lua` against the
+WoW API stubs in `tests/wow_stubs.lua` (the Settings panel builds against a faked
+`Settings` API; its rendered UI is never asserted on) and drives them through the
+addon's own event handlers: scans run off fixture bags, banks, and worn gear; tooltips
+render through the real `TooltipDataProcessor` post-call into a fake tooltip whose
+recorded lines the tests assert on. Each test boots a fresh addon world. What it locks
+are the DESIGN.md invariants:
+
+- the grand total equals the sum of the breakdown rows under **every** filter
+  combination, and every location suffix sums exactly to its line's count;
+- quality-sibling membership is all-or-nothing — a sibling counts toward the total only
+  when its tier resolves into a row;
+- a bank that can't currently be read never wipes its stored snapshot;
+- the settings sanitizer round-trips: persisted `false` survives, junk values reset,
+  and a DB-version rebuild carries `settings` over.
+
+The rule of thumb: **when you add or change data-layer or display behavior, add a
+test; when a claim needs the real client, add a checklist item below instead.** The
+stubs can't model real panel rendering, atlas art, `RefreshData`'s actual pipeline,
+item-cache timing, or taint — that's what the in-game checklist is for.
 
 ## In-game verification
 

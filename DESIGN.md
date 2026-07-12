@@ -224,6 +224,10 @@ Presentation: TooltipDataProcessor hook + display logic + the MODIFIER_STATE_CHA
 ### Settings.lua
 
 Settings layer: defaults/sanitizing for `db.settings`, the Options panel (vertical layout + Characters canvas subcategory), `/eic`. Owns `ns.InitSettings`, `ns.GetSettings`.
+
+### tests/
+
+Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank never-wipe, sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
 ```
 
 Files share the private addon table via the `local addonName, ns = ...` vararg. **Keep
