@@ -179,13 +179,15 @@ end
 -- The section-wide invariant: every lead line's count equals the sum of the breakdown
 -- rows under it (when rows rendered), and every suffixed line sums. A section can hold
 -- more than one scope -- a recipe renders its own "Total items owned:" lead plus a
--- "Crafted items:" lead for the product -- and rows always belong to the nearest lead
--- above them. Returns the FIRST lead's count (the hovered item's own total).
+-- "Crafted items:" lead for the product, and auction listings add an "On auction:"
+-- lead -- and rows always belong to the nearest lead above them. Returns the FIRST
+-- lead's count (the hovered item's own total).
 function H.assertSectionInvariant(tip)
 	local leads, rowSums, current = {}, {}, nil
 	for _, raw in ipairs(tip.lines) do
 		local s = H.strip(raw)
-		if s:find("^Total items owned:") or s:find("^Crafted items:") then
+		if s:find("^Total items owned:") or s:find("^Crafted items:")
+			or s:find("^On auction:") then
 			current = #leads + 1
 			leads[current] = raw
 		elseif s:find("^  ") then -- breakdown rows are indented two spaces
@@ -237,6 +239,7 @@ function H.charStore(t)
 		bags = t.bags and H.snap(t.bags) or nil,
 		bank = t.bank and H.snap(t.bank) or nil,
 		equipped = t.equipped and H.snap(t.equipped) or nil,
+		auctions = t.auctions and H.snap(t.auctions) or nil,
 	}
 end
 

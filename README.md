@@ -49,6 +49,20 @@ Crafted items: 12 (bags 4 · Liara 8)
   ★1: 4 (bags 4)
 ```
 
+**Items you're selling** — active auction listings show as their own `On auction` line
+with the same breakdown, never mixed into the owned total (a listed item is only yours
+if it doesn't sell). By default this covers the character you're playing (a plain
+`On auction: N`); a checkbox adds your other characters' listings, splitting each count
+into `yours` plus their names:
+
+```
+Total items owned: 2 (bags 2)
+  645 ★4: 2 (bags 2)
+On auction: 3 (yours 1 · Liara 2)
+  658 ★5: 1 (yours 1)
+  645 ★4: 2 (Liara 2)
+```
+
 **Everything else** — just the total:
 
 ```
@@ -68,7 +82,7 @@ If you own none anywhere, the section collapses to `Total items owned: 0`. And i
 3. The folder name must be **`ExactItemCount`** (it has to match `ExactItemCount.toc`).
 4. Restart WoW, or `/reload` if it's running. Make sure **Exact Item Count** is enabled in the AddOns list on the character-select screen.
 
-That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle each location — bank, warband bank, equipped items, other characters (always / only while a modifier key is held / never), plus a checkbox for whether to count your alts' equipped gear; compact-tooltip modes, including whether recipe tooltips count the crafted item (always / only while the key is held / never); and a list of your scanned characters with per-character hide and delete.
+That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle each location — bank, warband bank, equipped items, other characters, the `On auction` section (always / only while a modifier key is held / never), plus checkboxes for whether to count your alts' equipped gear and whether to include their auction listings; compact-tooltip modes, including whether recipe tooltips count the crafted item (always / only while the key is held / never); and a list of your scanned characters with per-character hide and delete.
 
 ## Scope (current version)
 
@@ -77,13 +91,15 @@ That's it. Options live under **Options → AddOns → Exact Item Count** (or `/
 - ✅ All of your characters — anything scanned while playing an alt shows up account-wide
 - ✅ Per-item-level breakdown with crafting-quality rank and upgrade-track progress
 - ✅ Recipes: the crafted item is counted too, with its own breakdown
+- ✅ Auction listings — a separate `On auction` count, never mixed into the owned total
+  (updated when you visit the auction house)
 - ✅ Where-it-is breakdown on every count
 - ✅ Settings (display-only filtering — what's counted on screen, never what's cached)
 - ⬜ Amount of gold *(planned)*
 
 ## Performance & safety
 
-Light by design: it reads your bags only when their contents change, rereads your equipped gear when you swap a piece, snapshots your bank and warband bank while the bank window is open, and adds a few lines to tooltips. Snapshots are remembered between sessions (saved in the `ExactItemCountDB` saved variable), which is how bank and alt counts stay available anywhere — even at the mailbox on another character. It performs **read-only** operations and does nothing that could taint Blizzard's secure code.
+Light by design: it reads your bags only when their contents change, rereads your equipped gear when you swap a piece, snapshots your bank and warband bank while the bank window is open (and your auction listings while the auction house is open), and adds a few lines to tooltips. Snapshots are remembered between sessions (saved in the `ExactItemCountDB` saved variable), which is how bank and alt counts stay available anywhere — even at the mailbox on another character. It performs **read-only** operations and does nothing that could taint Blizzard's secure code.
 
 ## Contributing
 

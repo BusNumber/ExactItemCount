@@ -587,6 +587,231 @@ test("secondary_data_post_call_skipped", function()
 		"matching primary data renders")
 end)
 
+-- ---------------------------------------------------------------- auction sub-section
+
+-- Auction world: crafted chest 101 -- own bags 2@645 (R4); listings: own 1@658 (R5),
+-- alt Liara 2@645 (R4). aLink = the hovered R4 link.
+local aLink
+local function auctionDB(S)
+	S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
+	aLink = S.link(101, "r4", { ilvl = 645, crafted = 4 })
+	local l658 = S.link(101, "r5", { ilvl = 658, crafted = 5 })
+	return H.db({
+		chars = {
+			[H.OWN] = H.charStore({
+				bags = H.dbItems({ { id = 101, count = 2, ilvl = 645, link = aLink } }),
+				auctions = H.dbItems({ { id = 101, count = 1, ilvl = 658, link = l658 } }),
+			}),
+			["Liara-RealmA"] = H.charStore({
+				auctions = H.dbItems({ { id = 101, count = 2, ilvl = 645, link = aLink } }),
+			}),
+		},
+	})
+end
+
+test("auction_section_below_main_with_gear_rows", function()
+	local ns = loadAddon({ noPEW = true, db = auctionDB })
+	ns.GetSettings().altAuctions = true
+	local tip = H.hover({ id = 101, hyperlink = aLink })
+	H.assertSectionInvariant(tip) -- the On auction lead is its own scope
+	-- Listings never merge into the owned total (2, not 5); the sub-section carries the
+	-- full per-ilvl breakdown, own listings as the "yours" token, alts by name.
+	assertEq(H.plainLines(tip), {
+		" ",
+		"Total items owned: 2 (bags 2)",
+		"  645 {Professions-ChatIcon-Quality-Tier4}: 2 (bags 2)",
+		"On auction: 3 (yours 1" .. DOT .. "Liara 2)",
+		"  658 {Professions-ChatIcon-Quality-Tier5}: 1 (yours 1)",
+		"  645 {Professions-ChatIcon-Quality-Tier4}: 2 (Liara 2)",
+	})
+	assertTrue(tip.lines[4]:find("|cff808080yours 1|r", 1, true) ~= nil,
+		"own-listings token at the suffix base color")
+	-- The block holds the same item that is under the cursor, so the hover marking
+	-- follows it: the 645 row is gold with a white count, the 658 row stays dim, and
+	-- the lead itself never marks.
+	assertTrue(tip.lines[6]:find("|cffffd100", 1, true) ~= nil, "hovered variant gold in the block")
+	assertTrue(tip.lines[6]:find("|cffffffff2|r", 1, true) ~= nil, "its count white")
+	assertTrue(tip.lines[5]:find("|cffb3b3b3", 1, true) ~= nil, "other listed ilvl dim")
+	assertTrue(tip.lines[4]:find("|cffffd100", 1, true) == nil, "the lead itself is never gold")
+end)
+
+test("auction_default_excludes_alts", function()
+	loadAddon({ noPEW = true, db = auctionDB })
+	local tip = H.hover({ id = 101, hyperlink = aLink })
+	H.assertSectionInvariant(tip)
+	-- altAuctions defaults off: an alt's listings are the addon's stalest data, so the
+	-- default section is the current character only -- absent from lead, rows and
+	-- suffix. And with the scope restricted to "you", every suffix would be a constant
+	-- "yours N" restating its line, so the suffixes drop wholesale.
+	assertEq(H.plainLines(tip), {
+		" ",
+		"Total items owned: 2 (bags 2)",
+		"  645 {Professions-ChatIcon-Quality-Tier4}: 2 (bags 2)",
+		"On auction: 1",
+		"  658 {Professions-ChatIcon-Quality-Tier5}: 1",
+	})
+	-- The hovered 645 has no listings: markOnly means no synthetic 0-row, so nothing
+	-- in the block is gold.
+	for i = 4, 5 do
+		assertTrue(tip.lines[i]:find("|cffffd100", 1, true) == nil,
+			"no marking without a matching listed row")
+	end
+end)
+
+test("auction_zero_renders_no_line", function()
+	local ns = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({
+			chars = {
+				[H.OWN] = H.charStore({ bags = H.dbItems({ { id = 301, count = 1 } }) }),
+				["Liara-RealmA"] = H.charStore({ auctions = H.dbItems({ { id = 301, count = 4 } }) }),
+			},
+		})
+	end })
+	-- A zero auction count renders NOTHING -- unlike the owned total, whose zero is the
+	-- answer being asked for. Under the default, the alt-only listing counts as zero.
+	assertEq(H.plainLines(H.hover({ id = 301 })), { " ", "Total items owned: 1 (bags 1)" })
+	ns.GetSettings().altAuctions = true
+	assertEq(H.plainLines(H.hover({ id = 301 })), {
+		" ",
+		"Total items owned: 1 (bags 1)",
+		"On auction: 4 (Liara 4)",
+	})
+end)
+
+test("auction_only_content_keeps_spacer", function()
+	local ns = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = { [H.OWN] = H.charStore({
+			auctions = H.dbItems({ { id = 301, count = 3 } }),
+		}) } })
+	end })
+	ns.GetSettings().hideZero = true
+	-- Owned 0 (dropped by hideZero) but listed 3: the section still renders, spacer
+	-- included -- the all-hidden early return must count the auction block as content.
+	-- (Own-only scope: no suffix.)
+	assertEq(H.plainLines(H.hover({ id = 301 })), { " ", "On auction: 3" })
+end)
+
+test("auctions_mode_tristate", function()
+	local ns, S = loadAddon({ noPEW = true, db = auctionDB })
+	ns.GetSettings().auctionsMode = "never"
+	assertEq(#H.hover({ id = 101, hyperlink = aLink }).lines, 3) -- main section only
+	ns.GetSettings().auctionsMode = "modifier"
+	assertEq(#H.hover({ id = 101, hyperlink = aLink }).lines, 3) -- key up: hidden
+	S.keys.ALT = true
+	local tip = H.hover({ id = 101, hyperlink = aLink })
+	assertTrue(H.plainLines(tip)[4]:find("On auction", 1, true) ~= nil,
+		"sub-section appears while the key is held")
+	H.assertSectionInvariant(tip)
+end)
+
+test("auction_alts_follow_altsmode_and_hidden", function()
+	local ns, S = loadAddon({ noPEW = true, db = auctionDB })
+	local s = ns.GetSettings()
+	s.altAuctions = true
+	local function line4() return H.plainLines(H.hover({ id = 101, hyperlink = aLink }))[4] end
+	-- The alts tri-state still rules the auction scope -- and with alts gated off, the
+	-- scope is own-only, so the suffix drops with them.
+	s.altsMode = "never"
+	assertEq(line4(), "On auction: 1")
+	s.altsMode = "modifier" -- the modifier folding carries over, suffix included
+	assertEq(line4(), "On auction: 1")
+	S.keys.ALT = true
+	assertEq(line4(), "On auction: 3 (yours 1" .. DOT .. "Liara 2)")
+	S.keys.ALT = false
+	-- Hidden is different from gated-off: alts CAN appear (the tri-state passes), the
+	-- one alt just doesn't -- so the suffix stays, and "yours 1" alone says "and no
+	-- other character has any".
+	s.altsMode = "always"
+	s.hiddenChars["Liara-RealmA"] = true
+	assertEq(line4(), "On auction: 1 (yours 1)")
+end)
+
+test("auction_nil_settings_own_only", function()
+	-- No settings layer loaded: the sub-section defaults to shown, current character
+	-- only -- matching the "always" + unchecked-alts defaults the sanitizer would fill.
+	loadAddon({ noPEW = true, files = { "Core.lua", "Tooltip.lua" }, db = auctionDB })
+	local tip = H.hover({ id = 101, hyperlink = aLink })
+	H.assertSectionInvariant(tip)
+	assertEq(H.plainLines(tip)[4], "On auction: 1")
+end)
+
+test("auction_quality_tiers_join_in_section", function()
+	local lS, lG
+	local ns = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(201, { name = "Rousing Fiber", reagent = 1 })
+		S.defineItem(202, { name = "Rousing Fiber", reagent = 2 })
+		lS = S.link(201, "s")
+		lG = S.link(202, "g")
+		return H.db({
+			chars = {
+				[H.OWN] = H.charStore({ auctions = H.dbItems({ { id = 201, count = 3, link = lS } }) }),
+				["Liara-RealmA"] = H.charStore({
+					auctions = H.dbItems({ { id = 202, count = 5, link = lG } }),
+				}),
+			},
+		})
+	end })
+	ns.GetSettings().altAuctions = true
+	local tip = H.hover({ id = 201, hyperlink = lS })
+	H.assertSectionInvariant(tip)
+	-- The name-sibling tier join works inside the auction scope: one row per tier, best
+	-- first, the lead equal to their sum -- while the owned total stays honestly zero.
+	assertEq(H.plainLines(tip), {
+		" ",
+		"Total items owned: 0",
+		"On auction: 8 (yours 3" .. DOT .. "Liara 5)",
+		"  {Professions-ChatIcon-Quality-12-Tier2}: 5 (Liara 5)",
+		"  {Professions-ChatIcon-Quality-12-Tier1}: 3 (yours 3)",
+	})
+	-- The hovered silver tier's row marks gold; the other tier stays dim.
+	assertTrue(tip.lines[5]:find("|cffffd100", 1, true) ~= nil, "hovered tier marked")
+	assertTrue(tip.lines[4]:find("|cffb3b3b3", 1, true) ~= nil, "other tier dim")
+	-- Hovering the gold tier with the scope own-only (silver listed only): markOnly --
+	-- no synthetic 0-row for the unlisted hovered tier, so nothing marks; no suffix.
+	ns.GetSettings().altAuctions = false
+	local tip2 = H.hover({ id = 202, hyperlink = lG })
+	assertEq(H.plainLines(tip2), {
+		" ",
+		"Total items owned: 0",
+		"On auction: 3",
+		"  {Professions-ChatIcon-Quality-12-Tier1}: 3",
+	})
+	for _, raw in ipairs(tip2.lines) do
+		assertTrue(raw:find("|cffffd100", 1, true) == nil,
+			"no synthetic marked row for the unlisted hovered tier")
+	end
+end)
+
+test("auction_order_with_recipe_product", function()
+	loadAddon({ noPEW = true, db = function(S)
+		local db = recipeDB(S)
+		-- the hovered recipe itself is also listed (a BoE world-drop being sold)
+		db.chars[H.OWN].auctions = H.snap(H.dbItems({ { id = 310, count = 2 } }))
+		return db
+	end })
+	local tip = H.hover({ id = 310, hyperlink = rLink })
+	H.assertSectionInvariant(tip) -- three independent lead scopes
+	local plain = H.plainLines(tip)
+	-- The hovered item's two scopes stay adjacent; the product block follows. The
+	-- auction scope is own-only under the default, so its lead carries no suffix.
+	assertEq(plain[2], "Total items owned: 1 (bags 1)")
+	assertEq(plain[3], "On auction: 2")
+	assertEq(plain[4], "Crafted items: 12 (bags 4" .. DOT .. "Liara 8)")
+end)
+
+test("auctions_mode_modifier_matters", function()
+	local ns, S = loadAddon({ noPEW = true, db = auctionDB })
+	S.watched.GameTooltip.shown = true
+	ns.GetSettings().auctionsMode = "modifier"
+	S.pressModifier("LALT", true)
+	assertEq(S.watched.GameTooltip.refreshCount, 1)
+	ns.GetSettings().auctionsMode = "always"
+	S.pressModifier("LALT", false)
+	assertEq(S.watched.GameTooltip.refreshCount, 1) -- nothing varies: no rebuild
+end)
+
 -- ---------------------------------------------------------------- suffix & settings
 
 test("suffix_fixed_order_and_bags_brightness", function()

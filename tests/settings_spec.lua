@@ -11,6 +11,8 @@ test("defaults_fill_missing_keys", function()
 		equippedMode = "always",
 		altsMode = "always",
 		altEquipped = true,
+		auctionsMode = "always",
+		altAuctions = false, -- alts' listings are opt-in (the stalest data the addon holds)
 		modifier = "ALT", -- fresh installs get Alt (Shift doubles as the compare key)
 		suffixMode = "always",
 		rowsMode = "always",
@@ -36,6 +38,21 @@ test("persisted_falsy_values_survive", function()
 	assertEq(s.bankMode, "never")
 	assertEq(s.recipeProductMode, "never")
 	assertEq(s.warbandMode, "always") -- missing keys still fill in around them
+end)
+
+test("auction_settings_roundtrip", function()
+	-- Both non-default choices survive a reload...
+	local ns = loadAddon({ noPEW = true, db = H.db({ settings = {
+		auctionsMode = "never", altAuctions = true,
+	} }) })
+	assertEq(ns.GetSettings().auctionsMode, "never")
+	assertEq(ns.GetSettings().altAuctions, true)
+	-- ...and junk degrades to the defaults.
+	local ns2 = loadAddon({ noPEW = true, db = H.db({ settings = {
+		auctionsMode = "sometimes", altAuctions = "yes",
+	} }) })
+	assertEq(ns2.GetSettings().auctionsMode, "always")
+	assertEq(ns2.GetSettings().altAuctions, false)
 end)
 
 test("existing_modifier_choice_kept", function()
@@ -111,7 +128,7 @@ test("settings_table_identity_binding", function()
 			assertEq(reg.varType, type(reg.default), variable .. " varType matches its default")
 		end
 	end
-	assertEq(count, 13) -- every non-proxy setting registered exactly once
+	assertEq(count, 15) -- every non-proxy setting registered exactly once
 	assertTrue(S.settingsRegistry["ExactItemCount_altsExpandKey"].proxy,
 		"the list-all checkbox registers as a proxy setting")
 end)

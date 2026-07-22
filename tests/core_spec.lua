@@ -238,6 +238,97 @@ test("warband_only_session_keeps_char_bank", function()
 	assertEq(_G.ExactItemCountDB.warband.items[201].total, 8)
 end)
 
+-- ---------------------------------------------------------------- auction scans
+
+test("auction_scan_on_owned_update", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
+		S.defineItem(201, { name = "Rousing Fiber", reagent = 1 })
+	end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	assertEq(S.calls.queryOwned, 1) -- the owned-listings query fires at open
+	S.ownedAuctions = {
+		{ itemKey = { itemID = 101, itemLevel = 658 }, quantity = 1, status = 0,
+			itemLink = S.link(101, "r5", { ilvl = 658, crafted = 5 }) },
+		-- itemKey carries no ilvl but the link does: the fallback fills it in
+		{ itemKey = { itemID = 101, itemLevel = 0 }, quantity = 1, status = 0,
+			itemLink = S.link(101, "r4", { ilvl = 645, crafted = 4 }) },
+		-- a commodity: no hyperlink, no meaningful ilvl -- lands in the ilvl-0 group
+		{ itemKey = { itemID = 201, itemLevel = 0 }, quantity = 40, status = 0 },
+	}
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	local snap = _G.ExactItemCountDB.chars[H.OWN].auctions
+	assertEq(snap.scannedAt, 1000)
+	assertEq(snap.items[101].total, 2)
+	assertEq(snap.items[101].groups[658].count, 1)
+	assertEq(snap.items[101].groups[645].count, 1)
+	assertEq(snap.items[201].total, 40)
+	assertEq(snap.items[201].groups[0].count, 40)
+	-- listings carry no readable tooltip data: no track fetch may ever happen
+	assertEq(S.calls.bagTip + S.calls.invTip, 0)
+end)
+
+test("auction_scan_sold_excluded_lenient_fields", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	S.ownedAuctions = {
+		{ itemKey = { itemID = 301 }, quantity = 2, status = 1 }, -- sold: the item is gone
+		{ itemKey = { itemID = 301 }, quantity = 3 },             -- absent status: still counted
+		{ itemKey = { itemID = 301 } },                           -- absent quantity: one item
+		{ itemKey = {}, quantity = 9 },                           -- no itemID: skipped
+		{ quantity = 9 },                                         -- no itemKey at all: skipped
+	}
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	local items = _G.ExactItemCountDB.chars[H.OWN].auctions.items
+	assertEq(items[301].total, 4)
+	local n = 0
+	for _ in pairs(items) do n = n + 1 end
+	assertEq(n, 1)
+end)
+
+test("auction_scan_only_while_open_and_close_idempotent", function()
+	local _, S = loadAddon({ setup = function(S) S.defineItem(301, { name = "Acorn" }) end })
+	S.ownedAuctions = { { itemKey = { itemID = 301 }, quantity = 2, status = 0 } }
+	S.fire("OWNED_AUCTIONS_UPDATED") -- AH not open: a stray event must not scan
+	assertEq(_G.ExactItemCountDB.chars[H.OWN].auctions, nil)
+	S.fire("AUCTION_HOUSE_SHOW")
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	local char = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(char.auctions.items[301].total, 2)
+	S.fire("AUCTION_HOUSE_CLOSED")
+	S.fire("AUCTION_HOUSE_CLOSED") -- a double close stays idempotent (the bank precedent)
+	S.ownedAuctions = { { itemKey = { itemID = 301 }, quantity = 9, status = 0 } }
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(char.auctions.items[301].total, 2) -- closed: the snapshot keeps its last scan
+end)
+
+test("auction_never_wipes_nil_or_partial_but_empty_swaps", function()
+	local _, S = loadAddon({ setup = function(S) S.defineItem(301, { name = "Acorn" }) end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	S.ownedAuctions = { { itemKey = { itemID = 301 }, quantity = 2, status = 0 } }
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	local char = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(char.auctions.scannedAt, 1000)
+	S.advance(100) -- a successful rescan from here on would restamp scannedAt to 1100
+
+	S.ownedAuctions = nil -- no result set in hand
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(char.auctions.scannedAt, 1000)
+
+	S.ownedAuctions = {}
+	S.fullOwnedResults = false -- partial pages must not swap in an under-count
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(char.auctions.scannedAt, 1000)
+	assertEq(char.auctions.items[301].total, 2)
+
+	S.fullOwnedResults = true -- a complete empty result IS real: everything sold/collected
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(char.auctions.scannedAt, 1100)
+	assertEq(next(char.auctions.items), nil)
+end)
+
 -- ---------------------------------------------------------------- DB lifecycle
 
 test("fresh_db_stamped_and_foreign_addon_ignored", function()
@@ -287,6 +378,9 @@ end)
 -- own bags 2@645, own bank 1@645 + 1@658, own equipped 1@658, warband 4@645,
 -- alt Liara bags 3@645 + equipped 1@658, alt Bram bank 2@658. Full total 15.
 -- Item 401 exists only in the own bank (for the filtered-to-nothing case).
+-- Auction stores (own 1@658, Liara 2@645) are ALSO seeded -- the normal path must never
+-- visit them, so the unchanged totals asserted by the tests below double as the no-leak
+-- lock; only the auctionsOnly scope sees them.
 local function worldDB(S)
 	S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
 	local l645 = S.link(101, "r4", { ilvl = 645, crafted = 4 })
@@ -302,10 +396,12 @@ local function worldDB(S)
 					{ id = 401, count = 3 },
 				}),
 				equipped = H.dbItems({ { id = 101, count = 1, ilvl = 658, link = l658 } }),
+				auctions = H.dbItems({ { id = 101, count = 1, ilvl = 658, link = l658 } }),
 			}),
 			["Liara-RealmA"] = H.charStore({
 				bags = H.dbItems({ { id = 101, count = 3, ilvl = 645, link = l645 } }),
 				equipped = H.dbItems({ { id = 101, count = 1, ilvl = 658, link = l658 } }),
+				auctions = H.dbItems({ { id = 101, count = 2, ilvl = 645, link = l645 } }),
 			}),
 			["Bram-RealmA"] = H.charStore({
 				bank = H.dbItems({ { id = 101, count = 2, ilvl = 658, link = l658 } }),
@@ -352,6 +448,67 @@ test("get_invariants_under_every_filter", function()
 		altEquipped = true, hiddenChars = { ["Liara-RealmA"] = true } })
 	assertEq(agg.total, 11)
 	assertEq(agg.sources.alts, { Bram = 2 })
+end)
+
+test("get_auctions_only_scope", function()
+	local ns = loadAddon({ noPEW = true, db = worldDB })
+	-- Alts included: own listings under the "auctions" tag, alts folded by name.
+	local agg = ns.Get(101, { auctionsOnly = true, alts = true })
+	assertEq(agg.total, 3)
+	assertEq(agg.sources, { auctions = 1, alts = { Liara = 2 } })
+	assertEq(agg.groups[658].count, 1)
+	assertEq(agg.groups[658].sources, { auctions = 1 })
+	assertEq(agg.groups[645].count, 2)
+	assertEq(agg.groups[645].sources, { alts = { Liara = 2 } })
+	H.assertNoZeros(agg.sources)
+	-- Current character only.
+	agg = ns.Get(101, { auctionsOnly = true, alts = false })
+	assertEq(agg.total, 1)
+	assertEq(agg.sources, { auctions = 1 })
+	-- Hidden alts drop out of the auction scope like any other.
+	agg = ns.Get(101, { auctionsOnly = true, alts = true, hiddenChars = { ["Liara-RealmA"] = true } })
+	assertEq(agg.total, 1)
+	assertEq(agg.sources, { auctions = 1 })
+end)
+
+test("auctions_never_leak_into_normal_scope", function()
+	local ns = loadAddon({ noPEW = true, db = worldDB })
+	-- The normal path must never visit auction stores: a nil filter ("everything") and
+	-- every display-filter combination all exclude the auction fixtures seeded above.
+	-- (The totals themselves are locked by the two tests above; this pins the key.)
+	assertEq(ns.Get(101).total, 15)
+	assertEq(ns.Get(101).sources.auctions, nil)
+	H.eachFilter(function(f)
+		assertTrue(ns.Get(101, f).sources.auctions == nil,
+			"auctions key leaked into a normal-scope view")
+	end)
+end)
+
+test("getbyname_auctions_only_threads_both_passes", function()
+	local ns = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(201, { name = "Rousing Fiber", reagent = 1 })
+		S.defineItem(202, { name = "Rousing Fiber", reagent = 2 })
+		return H.db({
+			chars = {
+				[H.OWN] = H.charStore({
+					bags = H.dbItems({ { id = 201, count = 7 } }), -- normal scope only
+					auctions = H.dbItems({ { id = 201, count = 3 } }),
+				}),
+				["Liara-RealmA"] = H.charStore({
+					auctions = H.dbItems({ { id = 202, count = 5 } }),
+				}),
+			},
+		})
+	end })
+	-- Both GetByName passes must honor the mode: the bag-owned 7 stays out of the
+	-- auction scope, and the alt's sibling tier joins only when alts do.
+	local _, members, combined = ns.GetByName(201, { auctionsOnly = true, alts = true })
+	assertEq(#members, 2)
+	assertEq(combined.total, 8)
+	assertEq(combined.sources, { auctions = 3, alts = { Liara = 5 } })
+	local _, members2, combined2 = ns.GetByName(201, { auctionsOnly = true, alts = false })
+	assertEq(#members2, 1)
+	assertEq(combined2.total, 3)
 end)
 
 test("get_representative_precedence_follows_visit_order", function()
@@ -477,10 +634,13 @@ end)
 test("merge_sources_sums_tags_and_alts", function()
 	local ns = loadAddon({ noPEW = true })
 	local dst = { bags = 1, alts = { Liara = 2 } }
-	ns.MergeSources(dst, { bags = 2, bank = 3, warband = 1, equipped = 4, alts = { Liara = 1, Bram = 4 } })
-	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, alts = { Liara = 3, Bram = 4 } })
+	ns.MergeSources(dst, { bags = 2, bank = 3, warband = 1, equipped = 4, auctions = 2,
+		alts = { Liara = 1, Bram = 4 } })
+	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, auctions = 2,
+		alts = { Liara = 3, Bram = 4 } })
 	ns.MergeSources(dst, {}) -- empty source: no-op, and no zero keys appear
-	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, alts = { Liara = 3, Bram = 4 } })
+	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, auctions = 2,
+		alts = { Liara = 3, Bram = 4 } })
 end)
 
 test("delete_char_guards", function()

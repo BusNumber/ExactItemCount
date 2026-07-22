@@ -17,6 +17,11 @@ local DEFAULTS = {
 	equippedMode = "always",   -- the current character's worn gear/profession tools
 	altsMode    = "always",
 	altEquipped = true,        -- count other characters' worn gear too (folds into their total)
+	auctionsMode = "always",   -- the "On auction" sub-section (never part of the owned total)
+	altAuctions = false,       -- include other characters' listings in it. Off by default:
+	                           -- an alt's listings are the stalest data the addon holds
+	                           -- (they sell while offline and only heal when that alt next
+	                           -- visits the AH), so showing them is an informed opt-in.
 	modifier    = "ALT",       -- "SHIFT" | "ALT" | "CTRL". Alt, not Shift: Shift doubles as
 	                           -- the game's item-compare key, so a Shift-gated source would
 	                           -- flip every time gear is compared. Only fresh installs get
@@ -40,6 +45,7 @@ local ENUMS = {
 	warbandMode = TRI_STATE,
 	equippedMode = TRI_STATE,
 	altsMode    = TRI_STATE,
+	auctionsMode = TRI_STATE,
 	modifier    = { SHIFT = true, ALT = true, CTRL = true },
 	suffixMode  = { always = true, modifier = true },
 	rowsMode    = { always = true, modifier = true },
@@ -264,7 +270,8 @@ local function BuildCharactersPanel(category)
 			row.name:SetText(key .. (key == me
 				and (hidden and " |cff4e7a4e(current)|r" or " |cff00ff00(current)|r") or ""))
 			row.age:SetText("bags " .. Ago(char.bags and char.bags.scannedAt)
-				.. " \194\183 bank " .. Ago(char.bank and char.bank.scannedAt))
+				.. " \194\183 bank " .. Ago(char.bank and char.bank.scannedAt)
+				.. " \194\183 auctions " .. Ago(char.auctions and char.auctions.scannedAt))
 			row.eye:GetNormalTexture():SetDesaturated(hidden)
 			row.eye:SetAlpha(hidden and 0.4 or 1)
 			-- No delete for the current character; with the own key unresolved (panel open
@@ -315,6 +322,23 @@ local function RegisterPanel()
 	Settings.CreateDropdown(category, Register("altsMode", "Other characters"), TriStateOptions,
 		"Items on every other scanned character, bags and bank combined."
 			.. " Manage individual characters on the Characters page.")
+	local auctionsInit = Settings.CreateDropdown(category, Register("auctionsMode", "On auction"),
+		TriStateOptions,
+		"Items you have listed on the auction house (snapshot taken while the auction"
+			.. " house is open), shown as their own \"On auction\" line. Listings are"
+			.. " never added to the owned total.")
+	local altAuctionsInit = Settings.CreateCheckbox(category,
+		Register("altAuctions", "Include alts' auctions"),
+		"Also show items your other characters have listed, by name. Their listings are"
+			.. " a snapshot from each character's last auction house visit, so they can"
+			.. " be stale. Follows the Other characters setting above.")
+	-- Nested under the On auction dropdown for the sub-item margin; unlike the equipped
+	-- checkbox above (which governs a different scope than its parent), this one is a
+	-- strict sub-gate -- with the sub-section on Never it can change nothing -- so the
+	-- predicate grays it out then, the way the Top-N slider follows its detail mode.
+	altAuctionsInit:SetParentInitializer(auctionsInit, function()
+		return settings.auctionsMode ~= "never"
+	end)
 
 	layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Compact tooltip"))
 	Settings.CreateDropdown(category, Register("modifier", "Modifier key"), ModifierOptions,

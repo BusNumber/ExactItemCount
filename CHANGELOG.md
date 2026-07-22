@@ -14,6 +14,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-item-level breakdown — the number you're usually after when hovering a recipe. A
   new option (*Crafted item on recipes*) shows it always, only while the modifier key is
   held, or never.
+- Items you have listed on the **auction house** now show as their own `On auction`
+  line with the full per-quality / per-item-level breakdown (snapshot taken while the
+  auction house is open). Listings are kept **separate from `Total items owned`** — a
+  listed item is only yours if the listing doesn't sell — and the line only appears
+  when you actually have listings. New options: an *On auction* location tri-state
+  (always / only while the modifier key is held / never) and an *Include alts'
+  auctions* checkbox, off by default since another character's listings only update
+  when that character visits the auction house.
 
 ## [1.2.0] - 2026-07-06
 

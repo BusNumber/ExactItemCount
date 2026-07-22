@@ -141,6 +141,17 @@ local function SourceSuffix(sources, opts)
 	if sources.equipped then
 		Add(SUFFIX, "equipped " .. tostring(sources.equipped))
 	end
+	-- The current character's own auction listings. Only auction-scope aggregates carry
+	-- this key (the scopes never mix -- see ForEachSourceStore), so the token appears
+	-- solely inside the "On auction" sub-section, where repeating "auctions" would be
+	-- redundant: the place is already in the lead, so the own token is a possessive,
+	-- there to contrast with the named alts beside it. (When alts can't appear in the
+	-- section, the caller suppresses its suffixes wholesale -- a constant "yours N"
+	-- restating each line would carry no information.) Base suffix color -- nothing
+	-- listed is "in hand", so no bags-style brightness.
+	if sources.auctions then
+		Add(SUFFIX, "yours " .. tostring(sources.auctions))
+	end
 	if sources.alts then
 		local names = {}
 		for name in pairs(sources.alts) do
@@ -198,9 +209,11 @@ end
 -- at 0 -- so an R5 you're about to craft appears explicitly, highlighted gold. Dropped
 -- gear on an upgrade track is badged "(H 1/6)" instead of the bare "ilvl" prefix; tracks
 -- and crafting ranks are mutually exclusive (crafted gear is recrafted, never upgraded).
-local function ShowGearBreakdown(tooltip, entry, link, hoveredTrack, opts)
+local function ShowGearBreakdown(tooltip, entry, link, hoveredTrack, opts, markOnly)
 	-- `link` can legitimately be nil (TooltipData's id and hyperlink are both optional);
 	-- without one there is no hovered ilvl to resolve, and the rows below handle that.
+	-- `markOnly` keeps the hover marking but drops the synthetic owned-0 row (the
+	-- auction block: same item under the cursor, but only actual listings may appear).
 	local hoveredIlvl = link and GetDetailedItemLevelInfo(link)
 	local rows, seen = {}, {}
 	if entry then
@@ -209,7 +222,7 @@ local function ShowGearBreakdown(tooltip, entry, link, hoveredTrack, opts)
 			seen[ilvl] = true
 		end
 	end
-	if hoveredIlvl and not seen[hoveredIlvl] then
+	if hoveredIlvl and not seen[hoveredIlvl] and not markOnly then
 		rows[#rows + 1] = hoveredIlvl
 	end
 	table.sort(rows, function(a, b) return a > b end)
@@ -255,7 +268,7 @@ end
 -- membership predicate the caller handed ns.GetByName -- an id without a resolvable tier
 -- never became a member, so row membership equals total membership by construction and
 -- no member can be silently dropped here.
-local function ShowQualityBreakdown(tooltip, members, tiers, hoveredTier, hoveredAtlas, opts)
+local function ShowQualityBreakdown(tooltip, members, tiers, hoveredTier, hoveredAtlas, opts, markOnly)
 	local rows = {}
 	for _, m in ipairs(members) do
 		local tier, atlas = tiers[m.itemID][1], tiers[m.itemID][2]
@@ -270,7 +283,7 @@ local function ShowQualityBreakdown(tooltip, members, tiers, hoveredTier, hovere
 			ns.MergeSources(row.sources, m.sources)
 		end
 	end
-	if hoveredTier and not rows[hoveredTier] then
+	if hoveredTier and not rows[hoveredTier] and not markOnly then
 		rows[hoveredTier] = { count = 0, atlas = hoveredAtlas } -- owned 0: no locations
 	end
 
@@ -355,16 +368,19 @@ local function LeadSuffix(agg, opts)
 end
 
 -- Breakdown rows for one aggregate; plain items have none. `hover` marks the hovered
--- item's own sub-section ({ link, track }): it supplies the gold/white emphasis and the
--- synthetic owned-0 row. nil hover (a recipe's product sub-section) renders every row
--- dim with no synthetic row -- nothing there is "the variant under the cursor".
+-- variant ({ link, track, markOnly }): it supplies the gold/white emphasis and -- unless
+-- `markOnly` -- the synthetic owned-0 row. markOnly is the auction block's shape: it
+-- holds the same item that is under the cursor (so a matching row marks gold), but only
+-- actual listings may appear in it, never a synthetic zero. nil hover (a recipe's
+-- product sub-section) renders every row dim with no synthetic row -- nothing there is
+-- "the variant under the cursor".
 local function ShowBreakdownRows(tooltip, agg, hover, opts)
 	if agg.isGear then
 		ShowGearBreakdown(tooltip, agg.entry, hover and hover.link or nil,
-			hover and hover.track or nil, opts)
+			hover and hover.track or nil, opts, hover and hover.markOnly)
 	elseif agg.tier then
 		ShowQualityBreakdown(tooltip, agg.members, agg.tiers,
-			hover and agg.tier or nil, hover and agg.atlas or nil, opts)
+			hover and agg.tier or nil, hover and agg.atlas or nil, opts, hover and hover.markOnly)
 	end
 end
 
@@ -441,27 +457,69 @@ local function OnItemTooltip(tooltip, data)
 	if productID and (not s or SourceEnabled(s.recipeProductMode, modDown)) then
 		productAgg = ComputeAggregate(productID, productLink, filter)
 	end
+	-- Auction listings are conditionally owned -- yours only if the listing fails -- so
+	-- they never fold into "Total items owned". They render as their own sub-section,
+	-- built by the same pipeline through the auctionsOnly filter mode (its lead equals
+	-- the sum of its rows by the same construction). The filter is built explicitly even
+	-- under nil settings: a nil filter would visit the NORMAL stores. Alts join only when
+	-- the opt-in checkbox is on AND the alts tri-state passes (already modifier-folded in
+	-- `filter`); the default is the current character only -- an alt's listings are the
+	-- stalest data the addon holds (they change while offline and only heal when that alt
+	-- next visits the AH).
+	local includeAlts = (s ~= nil and s.altAuctions and filter.alts) or false
+	local auctionAgg
+	if not s or SourceEnabled(s.auctionsMode, modDown) then
+		auctionAgg = ComputeAggregate(itemID, link, {
+			auctionsOnly = true,
+			alts = includeAlts,
+			hiddenChars = s ~= nil and s.hiddenChars or nil,
+		})
+	end
 	local hideZero = s and s.hideZero
 	local showSelf = not (hideZero and agg.total == 0)
 	local showProduct = productAgg ~= nil and not (hideZero and productAgg.total == 0)
-	if not showSelf and not showProduct then return end
+	-- Non-zero only, stricter than hideZero by design: zero listings is the norm for
+	-- nearly every item, so an ever-present "On auction: 0" would be pure noise (where a
+	-- zero OWNED total is the answer being asked for).
+	local showAuctions = auctionAgg ~= nil and auctionAgg.total > 0
+	if not showSelf and not showProduct and not showAuctions then return end
 
 	tooltip:AddLine(" ")
 
-	-- A zero total stands alone: every row under it would just restate the zero. For
-	-- gear, the hovered tooltip's own lines supply the upgrade track for the synthetic
-	-- owned-0 row, which has no stored group to read it from.
+	-- The hovered variant's identity, shared by both scopes that can contain it -- the
+	-- main section and the auction block -- so the gold/white marking follows the hover
+	-- wherever its row appears. For gear, the hovered tooltip's own lines supply the
+	-- upgrade track: the synthetic owned-0 row has no stored group to read it from, and
+	-- a matching auction row (scanned tracklessly) borrows it the same way.
+	local hover = { link = link }
+	if agg.isGear then
+		local name, step, max = ns.ParseUpgradeTrack(data.lines)
+		if name then
+			hover.track = { name = name, step = step, max = max }
+		end
+	end
+
+	-- A zero total stands alone: every row under it would just restate the zero.
 	if showSelf then
 		AddLead(tooltip, "Total items owned", agg.total, LeadSuffix(agg, opts))
 		if agg.total > 0 and showRows then
-			local hover = { link = link }
-			if agg.isGear then
-				local name, step, max = ns.ParseUpgradeTrack(data.lines)
-				if name then
-					hover.track = { name = name, step = step, max = max }
-				end
-			end
 			ShowBreakdownRows(tooltip, agg, hover, opts)
+		end
+	end
+
+	-- The auction sub-section, placed before the product block so the two hovered-item
+	-- scopes stay adjacent. It holds the same item that is under the cursor, so the
+	-- hover marking applies (markOnly: gold on a matching row, but never a synthetic
+	-- 0-row -- only actual listings appear here). The location suffix renders only
+	-- while alts can appear in it: restricted to the current character, every suffix
+	-- would be a constant "yours N" restating its line's count -- zero information --
+	-- and the lead alone names the scope's single possible location.
+	if showAuctions then
+		local auctionOpts = includeAlts and opts or { showSuffix = false }
+		AddLead(tooltip, "On auction", auctionAgg.total, LeadSuffix(auctionAgg, auctionOpts))
+		if showRows then
+			ShowBreakdownRows(tooltip, auctionAgg,
+				{ link = hover.link, track = hover.track, markOnly = true }, auctionOpts)
 		end
 	end
 
@@ -500,6 +558,7 @@ local function ModifierMatters(s)
 		or s.equippedMode == "modifier" or s.altsMode == "modifier"
 		or s.suffixMode == "modifier" or s.rowsMode == "modifier"
 		or s.bankMerge == "modifier" or s.recipeProductMode == "modifier"
+		or s.auctionsMode == "modifier"
 		or (s.altsExpandKey and s.altsDetail ~= "all")
 end
 

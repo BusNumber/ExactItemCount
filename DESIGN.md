@@ -161,6 +161,77 @@ Crafted items: 12 (bags 4 · Liara 8)
   which agrees with `data.id` — no product link is in hand, so the popup legitimately
   shows the recipe-only section.
 
+### On auction
+
+Active auction-house listings are counted, but **never into the grand total**: the test
+for `Total items owned` is *unconditional* ownership — bags, banks, worn gear and alts
+stay yours unless you act — and a listed item is yours only if the listing *fails*. Its
+expected outcome (it sells) removes it, and it can vanish through **other players'**
+actions while you're offline, unlike every other snapshot, which goes stale only through
+your own. Merged in, that would silently inflate "owned"; instead listings render as
+their own sub-section, placed between the hovered item's section and a recipe's
+`Crafted items` block so the two hovered-item scopes stay adjacent:
+
+```
+Total items owned: 2 (bags 2)
+  645 <star4>: 2 (bags 2)
+On auction: 3 (yours 1 · Liara 2)
+  658 <star5>: 1 (yours 1)
+  645 <star4>: 2 (Liara 2)
+```
+
+- The sub-section is built by the **same aggregate + render pipeline** through the
+  `auctionsOnly` filter mode (see [Seams](#seams)), so its invariant holds by the same
+  construction: `On auction` equals the sum of the rows below it and every suffix sums
+  to its row — its own scope, never combined with the owned numbers. Unlike the
+  `Crafted items` block (a *different* item, rendered wholly unhovered), this block
+  contains the hovered item itself, so the gold/white **hover marking applies**: a row
+  matching the hovered variant renders gold, exactly like the main section's (see
+  [Ordering and hover marking](#ordering-and-hover-marking)), and — being the same
+  variant — it borrows the hovered tooltip's upgrade-track badge through the standard
+  fallback. What does **not** carry over is the synthetic owned-0 row: only actual
+  listings may appear here (non-zero-only throughout), so a hovered variant with no
+  listings simply isn't in the block and nothing in it turns gold.
+- **Rendered only when the count is non-zero** — deliberately stricter than `hideZero`,
+  which never interacts with it: a zero *owned* total is the answer being asked for,
+  but zero listings is the norm for nearly every item, and an ever-present
+  `On auction: 0` would be pure noise.
+- The location suffix renders **only while alts can appear in it** (`altAuctions` on
+  and the *Other characters* tri-state passing). Restricted to the current character,
+  every suffix would be a constant `(yours N)` restating its line's count — zero
+  information — so the suffixes drop wholesale; "a no-suffix line never needs
+  interpreting" still holds, because the scope then has exactly one possible location
+  and the lead names it. With alts included, the own-listings token is **`yours N`** —
+  the one place the current character isn't a bare place-word: the place is already in
+  the lead, and `yours` exists to contrast with the named alts beside it. It sits at
+  the suffix base color (nothing listed is "in hand", so no bags-style brightness).
+  Note the gate is *can appear*, not *do appear*: with alts included but hidden or
+  holding no listings, `(yours N)` still renders — its presence then says "and no
+  other character has any".
+- **Alts' listings are opt-in** (`altAuctions` checkbox, default **off**): an alt's
+  auction snapshot is the stalest data the addon holds — its listings sell while you're
+  offline and only heal when that alt next visits the AH — so the default section is
+  the current character only. When enabled, alts still follow the *Other characters*
+  tri-state and the hidden-character flags.
+- **Sold (uncollected) listings are excluded** by status — the item is gone, the
+  proceeds arrive as gold via mail; an absent status field never drops a listing.
+  Expired/cancelled listings return through the mailbox and drop off the count at the
+  next AH visit.
+- Listings carry **no upgrade track** (no readable tooltip data at the AH), so gear
+  rows fall back to the trackless `ilvl X:` form — except a row matching the hovered
+  variant, which borrows the hovered tooltip's own track badge (it *is* the same
+  variant); rank stars still resolve from the stored links.
+- **Merging listings into the grand total — or a setting to do so — is rejected**: it
+  would be the first setting to change the *meaning* of the headline number rather
+  than its visibility, making every screenshot and bug report ambiguous. The
+  `auctionsMode` tri-state controls visibility only; since the data store is identical
+  either way, a merge mode could still be added later without schema changes if real
+  demand appears. (A separate auction iterator was likewise rejected — the
+  `auctionsOnly` mode reuses `ForEachSourceStore`'s alt scaffolding, which must never
+  drift into two copies.)
+- The `Crafted items` block keeps meaning *owned* product only; a product-listings
+  line on recipes is a possible future refinement, deliberately not implied here.
+
 ### The location suffix
 
 The total line and each breakdown row carry a dimmed per-location split:
@@ -181,7 +252,8 @@ The total line and each breakdown row carry a dimmed per-location split:
   name+count, gated by the `altEquipped` checkbox (see [Settings](#settings)).
 - Bare `bags`/`bank`/`equipped` always mean the character you're on. Alts are **name +
   count only** (`Liara 140`), realm stripped — same-named alts across realms merge in
-  display; the DB key keeps the realm.
+  display; the DB key keeps the realm. (The `On auction` sub-section's suffix has its
+  own two-token vocabulary — `yours` + alt names — see [On auction](#on-auction).)
 - **Source-major lines** (`Bags: N` per location, the way inventory addons usually
   render it) are rejected: they re-ambiguate the per-variant counts this addon exists
   to split.
@@ -210,8 +282,9 @@ even at 0" rule applies only while the total is above zero (an unowned R5 row be
 owned R4s; a 0-gold tier beside owned silver). The `hideZero` setting (off by default)
 drops the zero-total section entirely — checked **before** the spacer line so nothing
 strays. On recipes, the two sub-sections follow these rules independently (see
-[Recipes](#recipes)): the whole section — spacer included — disappears only when both
-are dropped.
+[Recipes](#recipes)); the `On auction` sub-section follows its own stricter
+non-zero-only rule instead (see [On auction](#on-auction)). The whole section — spacer
+included — disappears only when every sub-section is dropped.
 
 ### Settings
 
@@ -231,7 +304,14 @@ scans never change with settings.
   for the margin; always enabled — it governs alts, not this character's own equipped
   setting), gates whether alts' worn gear folds into their per-alt total. (A boolean, not
   a tri-state: alts have no per-source suffix tokens to modifier-gate, so the only
-  meaningful choice is in/out.)
+  meaningful choice is in/out.) *On auction* (`auctionsMode`, default always) is the
+  fifth entry — a tri-state like the rest, but it gates the separate `On auction`
+  sub-section rather than a share of the total (listings are never part of the owned
+  numbers; see [On auction](#on-auction)); its **Include alts' auctions** sub-checkbox
+  (`altAuctions`, default **off**) nests under it the same way — with the predicate
+  actually used this time: unlike `altEquipped`, this one is a strict sub-gate of its
+  parent (with the sub-section on *Never* it can change nothing), so it reads disabled
+  then, the way the Top-N slider follows its detail mode.
 - **Compact tooltip**: modifier key (Alt default / Shift / Ctrl — Alt because Shift
   doubles as the game's compare-items key, which would flip Shift-gated sources on every
   gear comparison; the default only reaches **fresh installs**, since `InitSettings`
@@ -279,7 +359,7 @@ Settings layer: defaults/sanitizing for `db.settings`, the Options panel (vertic
 
 ### tests/
 
-Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank never-wipe, sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
+Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank and auction never-wipe, auction-scope isolation (listings leak into no owned number), sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
 ```
 
 Files share the private addon table via the `local addonName, ns = ...` vararg. **Keep
@@ -305,12 +385,15 @@ ExactItemCountDB = {
       bags     = { scannedAt = <epoch>, items = <items> },
       bank     = { scannedAt = <epoch>, items = <items> },
       equipped = { scannedAt = <epoch>, items = <items> },     -- currently-worn gear/tools
+      auctions = { scannedAt = <epoch>, items = <items> },     -- active AH listings (sold excluded)
     },
   },
   settings = {                                                 -- account-wide display settings
     hideZero = false, altsExpandKey = false,                   -- booleans (bags: no setting)
     altEquipped = true,                                        -- count alts' worn gear too
+    altAuctions = false,                                       -- alts' listings in "On auction"
     bankMode/warbandMode/equippedMode/altsMode = "always"|"modifier"|"never",
+    auctionsMode = "always"|"modifier"|"never",                -- the "On auction" sub-section
     modifier = "SHIFT"|"ALT"|"CTRL",
     suffixMode/rowsMode = "always"|"modifier",
     recipeProductMode = "always"|"modifier"|"never",           -- "Crafted items" on recipes
@@ -369,7 +452,9 @@ buy invalidation bugs.
   The `equipped` key is the **current** character's worn gear only; an alt's worn gear
   is summed into its `alts[name]` entry alongside its bags/bank. Link/track
   representatives: first non-nil in visit order — own bags > own bank > own equipped >
-  warband > alts.
+  warband > alts. An `auctionsOnly` filter yields the **auction scope** instead:
+  `sources.auctions` (the current character's listings) plus `alts` — the two scopes'
+  keys never mix in one view.
 - `ns.GetByName(itemID, filter, accept)` → `(name, members, combined)`: `members` is an
   array of `ns.Get` views (plus an `itemID` field) for every name-sibling itemID anywhere
   in the DB; `combined = { total, sources }` summed across them, so the grand-total
@@ -390,7 +475,12 @@ buy invalidation bugs.
   **both** its passes so a sibling owned only in a filtered-out source contributes
   neither a row nor a total share. The tooltip layer builds the filter per render
   (`BuildFilter` in `Tooltip.lua`), folding live modifier state into the tri-state
-  settings.
+  settings. `filter.auctionsOnly = true` flips the visit set to **only** auction
+  stores (own + alts', with `alts`/`hiddenChars` still applying and the per-source
+  flags ignored); the normal path never visits auction stores at all, so listings
+  cannot leak into any owned aggregate and `BuildFilter`'s normal filter needs no
+  auctions key — the tooltip layer builds the auction filter separately per render,
+  folding in the `altAuctions` checkbox.
 - `ns.GetSettings()` → the live settings table (nil before init ⇒ default display);
   `ns.GetCharKey()` → current char's full key (nil before PEW); `ns.DeleteChar(key)` →
   drops a char's data + hidden flag, refuses the current char and refuses everything
@@ -501,6 +591,27 @@ a given line of code looks the way it does.
   (`C_Bank.CanUseBank` → `C_Bank.FetchPurchasedBankTabIDs(bankType)` non-empty → first
   tab `GetContainerNumSlots() > 0`) returns nil to mean "keep the existing snapshot".
   Away from the bank, tooltips serve the persisted snapshots.
+- **Owned auctions are fetched, not read**: `AUCTION_HOUSE_SHOW` sets the open flag and
+  fires `C_AuctionHouse.QueryOwnedAuctions({})`; the results land asynchronously via
+  `OWNED_AUCTIONS_UPDATED`, where `ScanAuctions` rebuilds the snapshot from
+  `C_AuctionHouse.GetOwnedAuctions()` — only while the flag is up, so a stray
+  post-close event never scans stale API state (`AUCTION_HOUSE_CLOSED` just clears the
+  flag, kept idempotent like `BANKFRAME_CLOSED`). The bank never-wipe rule applies with
+  the AH's own guards: a nil result list or
+  `C_AuctionHouse.HasFullOwnedAuctionResults()` returning false (partial pages) keeps
+  the stored snapshot, while a complete **empty** list is a real result — everything
+  sold/cancelled — and legitimately swaps in an empty snapshot. Per listing the scan
+  reads `itemKey.itemID`/`itemKey.itemLevel`, `quantity`, `itemLink`, `status`
+  (`Enum.AuctionStatus` — non-Active means sold, excluded; an **absent** status still
+  counts, so the check compares against Active rather than truthiness). Commodity
+  listings can arrive with `itemLevel = 0` and **no `itemLink`** — a nil link is stored
+  as-is (the quality join's all-or-nothing rule already absorbs an unresolvable tier),
+  and ilvl falls back link-then-0. There is no ItemLocation and no readable tooltip
+  data for a listing, so no `GetCurrentItemLevel` and no upgrade-track fetch. Field
+  names and enum values here are wiki-sourced — CONTRIBUTING's Auction listings
+  checklist verifies them in-game, along with whether the SHOW-time query can be
+  throttled away (`AUCTION_HOUSE_THROTTLED_SYSTEM_READY` retry is a possible follow-up;
+  the snapshot is then stale but never wrong).
 - **Bag iteration**: bags are `Enum.BagIndex.Backpack` (0) …
   `Enum.BagIndex.ReagentBag` (5), contiguous. Bank tabs post-11.2 rework: character
   `Enum.BagIndex.CharacterBankTab_1..6` (6–11), warband `AccountBankTab_1..5` (12–16) —

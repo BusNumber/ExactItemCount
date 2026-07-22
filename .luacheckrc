@@ -23,6 +23,7 @@ globals = {
 read_globals = {
 	-- C_ namespaces
 	"C_AddOns",
+	"C_AuctionHouse",
 	"C_Bank",
 	"C_Container",
 	"C_Item",

@@ -57,14 +57,18 @@ recorded lines the tests assert on. Each test boots a fresh addon world. What it
 are the DESIGN.md invariants:
 
 - every lead line's count equals the sum of the breakdown rows under it, under
-  **every** filter combination (a recipe section carries two lead lines — the recipe's
-  own total and the `Crafted items` product line — each its own scope), and every
-  location suffix sums exactly to its line's count;
+  **every** filter combination (a section can carry several lead lines — the hovered
+  item's own total, an `On auction` line, a `Crafted items` product line — each its own
+  scope), and every location suffix sums exactly to its line's count;
 - quality-sibling membership is all-or-nothing — a sibling counts toward the total only
   when its tier resolves into a row;
 - a recipe's product sub-section renders only for recipe-class items, is gated by its
   tri-state, and never renders twice on one frame;
-- a bank that can't currently be read never wipes its stored snapshot;
+- auction listings never leak into any owned number — the auction scope is isolated,
+  its sub-section renders only when non-zero, sold listings are excluded, and alts'
+  listings join only behind the opt-in checkbox;
+- a bank (or owned-auctions result) that can't currently be read never wipes its
+  stored snapshot;
 - the settings sanitizer round-trips: persisted `false` survives, junk values reset,
   and a DB-version rebuild carries `settings` over.
 
@@ -131,6 +135,43 @@ The reason this addon exists:
       only the `Crafted items` block shows (no `Total items owned: 0` line).
 - [ ] One-time API check: `/dump C_Item.GetItemInfoInstant(<recipe itemID>)` — confirm
       classID (Recipe = 9) is the 6th return.
+
+### Auction listings
+
+- [ ] One-time API check, with at least one live listing up: `/dump
+      C_AuctionHouse.GetOwnedAuctions()` — confirm the result shape the scan relies on
+      (`itemKey.itemID` / `itemKey.itemLevel`, `quantity`, `itemLink`, `status`), the
+      `Enum.AuctionStatus` values (which value is Active; that a sold-but-uncollected
+      listing is distinguishable), and that `itemLink` is present/absent as expected
+      for an **item** listing vs a **commodity** listing. Also `/dump
+      C_AuctionHouse.HasFullOwnedAuctionResults()` exists and behaves.
+- [ ] Confirm the event flow: `AUCTION_HOUSE_SHOW` → `QueryOwnedAuctions({})` is
+      accepted (watch for throttling — if the query is ever swallowed, does
+      `AUCTION_HOUSE_THROTTLED_SYSTEM_READY` warrant a retry?), `OWNED_AUCTIONS_UPDATED`
+      fires with the results, and whether posting/cancelling a listing while the AH is
+      open fires it again on its own.
+- [ ] List an item, close the AH, hover a copy anywhere: `On auction: N` appears below
+      the main section — no location suffix while the section covers only you — and
+      the grand total is **unchanged** by listing.
+- [ ] List crafted gear at two ranks: per-ilvl rows under `On auction`, highest first;
+      the row matching the hovered variant is gold like the main section's (and shows
+      the hovered item's upgrade-track badge if it has one), other rows dim. Hover a
+      rank you have **no** listing of: no synthetic `0` row appears in the block and
+      nothing in it is gold.
+- [ ] Sell or cancel everything, revisit the AH: the count drops and the line
+      disappears (zero listings render nothing). Confirm a **sold-but-uncollected**
+      listing is already excluded, and note where an **expired** listing goes.
+- [ ] *Include alts' auctions* off (the default): another character's listings never
+      appear. On: they appear by name inside the sub-section — and the location suffix
+      appears with them, own listings as `yours N` — still gated by *Other characters*
+      and the Characters-page eye; the checked state survives `/reload`.
+- [ ] The checkbox grays out while *On auction* is set to *Never* and re-enables when
+      it leaves *Never*.
+- [ ] Set *On auction* to *Only while held*: over an open tooltip, hold/release the
+      modifier — the block appears/vanishes in place, never duplicated.
+- [ ] Hover a commodity you have listed (no per-listing item link expected): its own
+      tier still counts; hovering its **other** quality tier may omit the listed tier
+      from the block until the cache warms — accepted, but confirm it self-heals.
 
 ### Persistence lifecycle
 

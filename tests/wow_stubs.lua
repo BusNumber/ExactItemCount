@@ -47,8 +47,10 @@ local function resetState()
 	M.equipped = {}           -- [invSlot] = stack
 	M.bankTabs = {}           -- [Enum.BankType.*] = { bagID, ... } | nil (none purchased)
 	M.bankUsable = {}         -- [Enum.BankType.*] = bool (C_Bank.CanUseBank)
+	M.ownedAuctions = nil     -- GetOwnedAuctions result; nil = no result set in hand
+	M.fullOwnedResults = true -- HasFullOwnedAuctionResults (false = partial pages)
 	M.displayedLink = nil     -- TooltipUtil.GetDisplayedItem fallback result
-	M.calls = { bagTip = 0, invTip = 0, requestLoad = {} }
+	M.calls = { bagTip = 0, invTip = 0, queryOwned = 0, requestLoad = {} }
 	M.settingsRegistry = {}   -- [variable] = capture from Settings.Register*Setting
 	M.valueChangedCallbacks = {}
 	M.itemPostCall = nil      -- the tooltip post-call Tooltip.lua registered (test entry point)
@@ -193,6 +195,7 @@ function M.install()
 		BankType = { Character = 0, Account = 2 },
 		ItemClass = { Recipe = 9 },
 		TooltipDataType = { Item = 17 },
+		AuctionStatus = { Active = 0, Sold = 1 },
 	}
 	_G.INVSLOT_FIRST_EQUIPPED = 1
 	_G.INVSLOT_LAST_EQUIPPED = 19
@@ -323,6 +326,15 @@ function M.install()
 	_G.C_Bank = {
 		CanUseBank = function(bankType) return M.bankUsable[bankType] or false end,
 		FetchPurchasedBankTabIDs = function(bankType) return M.bankTabs[bankType] end,
+	}
+
+	-- Owned-auction fixtures use the wiki's OwnedAuctionInfo shape directly:
+	-- { itemKey = { itemID, itemLevel }, quantity, itemLink, status } -- so the tests
+	-- encode the exact field mapping ScanAuctions relies on.
+	_G.C_AuctionHouse = {
+		QueryOwnedAuctions = function() M.calls.queryOwned = M.calls.queryOwned + 1 end,
+		GetOwnedAuctions = function() return M.ownedAuctions end,
+		HasFullOwnedAuctionResults = function() return M.fullOwnedResults end,
 	}
 
 	_G.C_AddOns = {

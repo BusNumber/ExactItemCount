@@ -20,6 +20,7 @@ local addonName, ns = ...
 --         bags     = { scannedAt = <epoch>, items = <items> },
 --         bank     = { scannedAt = <epoch>, items = <items> },
 --         equipped = { scannedAt = <epoch>, items = <items> },     -- currently-worn gear/tools
+--         auctions = { scannedAt = <epoch>, items = <items> },     -- active AH listings
 --       },
 --     },
 --     settings = { ... },   -- account-wide display settings; owned by Settings.lua
@@ -35,6 +36,7 @@ local DB_VERSION = 1
 local db       -- ExactItemCountDB, set at ADDON_LOADED
 local charKey  -- "Name-NormalizedRealm"; resolved lazily (realm is unreliable before PLAYER_ENTERING_WORLD)
 local bankOpen = false
+local ahOpen = false
 
 -- Bag range for the player's inventory: backpack (0), the four carried bags (1-4)
 -- and the reagent bag (5). These Enum values are contiguous, so a numeric loop works.
@@ -67,6 +69,14 @@ local GetBagItemTooltip       = C_TooltipInfo and C_TooltipInfo.GetBagItem
 local GetInventoryItemTooltip = C_TooltipInfo and C_TooltipInfo.GetInventoryItem
 local GetInventoryItemID      = GetInventoryItemID    -- global; (unit, slot) -> itemID|nil
 local GetInventoryItemLink    = GetInventoryItemLink  -- global; (unit, slot) -> hyperlink|nil
+local QueryOwnedAuctions      = C_AuctionHouse and C_AuctionHouse.QueryOwnedAuctions
+local GetOwnedAuctions        = C_AuctionHouse and C_AuctionHouse.GetOwnedAuctions
+local HasFullOwnedAuctionResults = C_AuctionHouse and C_AuctionHouse.HasFullOwnedAuctionResults
+
+-- Non-active listings (sold, awaiting collection) are excluded from the auction scan:
+-- the item is gone, its proceeds arrive as gold via mail. An absent status field must
+-- never drop a listing, so the comparison is against the Active value, not "truthy".
+local AUCTION_STATUS_ACTIVE = Enum.AuctionStatus and Enum.AuctionStatus.Active or 0
 
 -- Equip locations that do NOT count as gear. Non-equippable items return
 -- "INVTYPE_NON_EQUIP_IGNORE" from GetItemInfoInstant -- the token was renamed from
@@ -287,6 +297,35 @@ local function ScanEquipped()
 	char.equipped = { scannedAt = time(), items = items }
 end
 
+-- The character's active auction listings. Readable only while the AH is open, so the
+-- scan follows the bank's never-wipe philosophy: the snapshot swaps only when a real,
+-- complete owned-auctions result set is in hand -- a nil list (nothing fetched yet) or a
+-- partial page keeps the stored snapshot, while a genuinely empty list is a real result
+-- (everything sold/cancelled/collected) and legitimately swaps in an empty snapshot.
+-- Listings carry no ItemLocation and no readable tooltip data, so ilvl comes from the
+-- itemKey (0 for commodities) with the link as fallback, and the upgrade track is left
+-- unrecorded (nil fetchTip) -- a listed stack renders the trackless "ilvl X:" row form.
+local function ScanAuctions()
+	local char = EnsureChar()
+	if not char then return end
+	local list = GetOwnedAuctions and GetOwnedAuctions()
+	if not list then return end
+	if HasFullOwnedAuctionResults and not HasFullOwnedAuctionResults() then return end
+	local items = {}
+	for _, auction in ipairs(list) do
+		local id = auction.itemKey and auction.itemKey.itemID
+		if id and (auction.status == nil or auction.status == AUCTION_STATUS_ACTIVE) then
+			local link = auction.itemLink
+			local ilvl = auction.itemKey.itemLevel
+			if not (ilvl and ilvl > 0) and link then
+				ilvl = GetDetailedItemLevelInfo(link)
+			end
+			RecordStack(items, id, auction.quantity or 1, link, ilvl or 0, nil)
+		end
+	end
+	char.auctions = { scannedAt = time(), items = items }
+end
+
 -- Visits every source store as fn(items, tag, altName) -- tag is
 -- "bags"/"bank"/"equipped"/"warband" for the current character (altName nil), alts get
 -- altName (tag nil) with bags, bank and equipped all visited so they combine into one
@@ -303,16 +342,33 @@ end
 -- sees the realm-stripped display name, never the full key. Filtering at the iteration
 -- root is what keeps "the total equals the sum of everything displayed" true by
 -- construction in every aggregate built on top.
+--
+-- `filter.auctionsOnly` flips the visit set to the auction scope: ONLY auction stores --
+-- the own character's char.auctions as tag "auctions", each alt's folded into its
+-- altName -- with `alts` and `hiddenChars` still applying and the per-source flags
+-- (bags/bank/...) never consulted (they have no meaning there). The normal path never
+-- visits auction stores at all: listings are conditionally owned (yours only if the
+-- listing fails), so they must not leak into any "Total items owned" aggregate -- the
+-- tooltip layer renders them as their own "On auction" sub-section instead, built from
+-- the same aggregates through this mode.
 local function ForEachSourceStore(fn, filter)
 	if not db then return end
+	local auctionsOnly = filter ~= nil and filter.auctionsOnly
 	local me = ResolveCharKey()
 	local char = me and db.chars[me]
 	if char then
-		if (not filter or filter.bags) and char.bags then fn(char.bags.items, "bags") end
-		if (not filter or filter.bank) and char.bank then fn(char.bank.items, "bank") end
-		if (not filter or filter.equipped) and char.equipped then fn(char.equipped.items, "equipped") end
+		if auctionsOnly then
+			if char.auctions then fn(char.auctions.items, "auctions") end
+		else
+			if (not filter or filter.bags) and char.bags then fn(char.bags.items, "bags") end
+			if (not filter or filter.bank) and char.bank then fn(char.bank.items, "bank") end
+			if (not filter or filter.equipped) and char.equipped then fn(char.equipped.items, "equipped") end
+		end
 	end
-	if (not filter or filter.warband) and db.warband then fn(db.warband.items, "warband") end
+	-- The warband bank cannot hold listings, so the auction scope skips it.
+	if not auctionsOnly and (not filter or filter.warband) and db.warband then
+		fn(db.warband.items, "warband")
+	end
 
 	-- While the own key is still unresolved (pre-PLAYER_ENTERING_WORLD), self and alts are
 	-- indistinguishable: skip the alt loop rather than misattribute the current character's
@@ -335,12 +391,16 @@ local function ForEachSourceStore(fn, filter)
 			-- the key keeps the realm, so disambiguation can come later.)
 			local altName = key:match("^[^-]+") or key
 			local alt = db.chars[key]
-			if alt.bags then fn(alt.bags.items, nil, altName) end
-			if alt.bank then fn(alt.bank.items, nil, altName) end
-			-- Worn gear folds into the alt's combined per-alt number alongside bags/bank,
-			-- gated by the altEquipped checkbox rather than the own-equipped tri-state.
-			if (not filter or filter.altEquipped) and alt.equipped then
-				fn(alt.equipped.items, nil, altName)
+			if auctionsOnly then
+				if alt.auctions then fn(alt.auctions.items, nil, altName) end
+			else
+				if alt.bags then fn(alt.bags.items, nil, altName) end
+				if alt.bank then fn(alt.bank.items, nil, altName) end
+				-- Worn gear folds into the alt's combined per-alt number alongside bags/bank,
+				-- gated by the altEquipped checkbox rather than the own-equipped tri-state.
+				if (not filter or filter.altEquipped) and alt.equipped then
+					fn(alt.equipped.items, nil, altName)
+				end
 			end
 		end
 	end
@@ -367,6 +427,7 @@ local function MergeSources(dst, src)
 	if src.bank then dst.bank = (dst.bank or 0) + src.bank end
 	if src.equipped then dst.equipped = (dst.equipped or 0) + src.equipped end
 	if src.warband then dst.warband = (dst.warband or 0) + src.warband end
+	if src.auctions then dst.auctions = (dst.auctions or 0) + src.auctions end
 	if src.alts then
 		local alts = dst.alts
 		if not alts then
@@ -392,6 +453,8 @@ ns.MergeSources = MergeSources
 --     sources = { bags = n, bank = n, warband = n, alts = { [name] = n } },   -- zero keys absent
 --     groups  = { [ilvl] = { count, link, track, sources = <same shape> } },
 --   }
+-- An auctionsOnly filter yields the auction scope instead: `sources.auctions` (the own
+-- character's listings) plus `alts` -- the two scopes' keys never mix in one view.
 -- `filter` (optional) narrows the view to selected sources -- see ForEachSourceStore.
 function ns.Get(itemID, filter)
 	local agg
@@ -498,6 +561,10 @@ end
 -- present) -- so without piggybacking on the same delayed event that fixes bags, equipped
 -- would stay empty until the first manual gear swap. The scan is a cheap ~30-slot sweep,
 -- so a full rebuild per change is fine.
+-- Auctions follow the bank's open-flag pattern: the owned-listings query is fired when
+-- the AH opens, and OWNED_AUCTIONS_UPDATED rescans only while the flag is up -- a stray
+-- post-close event must not scan stale API state. The close handler just clears the
+-- flag, idempotent like BANKFRAME_CLOSED.
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -505,6 +572,9 @@ frame:RegisterEvent("BAG_UPDATE_DELAYED")
 frame:RegisterEvent("BANKFRAME_OPENED")
 frame:RegisterEvent("BANKFRAME_CLOSED")
 frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+frame:RegisterEvent("AUCTION_HOUSE_SHOW")
+frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
+frame:RegisterEvent("OWNED_AUCTIONS_UPDATED")
 frame:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
 		if arg1 ~= addonName then return end
@@ -543,5 +613,12 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		bankOpen = false
 	elseif event == "PLAYER_EQUIPMENT_CHANGED" then
 		ScanEquipped()
+	elseif event == "AUCTION_HOUSE_SHOW" then
+		ahOpen = true
+		if QueryOwnedAuctions then QueryOwnedAuctions({}) end
+	elseif event == "OWNED_AUCTIONS_UPDATED" then
+		if ahOpen then ScanAuctions() end
+	elseif event == "AUCTION_HOUSE_CLOSED" then
+		ahOpen = false
 	end
 end)
