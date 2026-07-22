@@ -14,6 +14,7 @@ test("defaults_fill_missing_keys", function()
 		modifier = "ALT", -- fresh installs get Alt (Shift doubles as the compare key)
 		suffixMode = "always",
 		rowsMode = "always",
+		recipeProductMode = "always",
 		altsDetail = "topn",
 		altsTopN = 2,
 		altsExpandKey = false,
@@ -26,12 +27,14 @@ end)
 test("persisted_falsy_values_survive", function()
 	local ns = loadAddon({ noPEW = true, db = H.db({ settings = {
 		altEquipped = false, altsExpandKey = false, hideZero = true, bankMode = "never",
+		recipeProductMode = "never",
 	} }) })
 	local s = ns.GetSettings()
 	assertEq(s.altEquipped, false) -- a persisted false must never be "default-filled" away
 	assertEq(s.altsExpandKey, false)
 	assertEq(s.hideZero, true)
 	assertEq(s.bankMode, "never")
+	assertEq(s.recipeProductMode, "never")
 	assertEq(s.warbandMode, "always") -- missing keys still fill in around them
 end)
 
@@ -49,6 +52,7 @@ test("invalid_values_reset_to_defaults", function()
 		hideZero = "yes",
 		altsTopN = "3",
 		bankMerge = false,
+		recipeProductMode = "sometimes",
 	} }) })
 	local s = ns.GetSettings()
 	assertEq(s.bankMode, "always")
@@ -57,6 +61,7 @@ test("invalid_values_reset_to_defaults", function()
 	assertEq(s.hideZero, false)
 	assertEq(s.altsTopN, 2)
 	assertEq(s.bankMerge, "separate")
+	assertEq(s.recipeProductMode, "always")
 end)
 
 test("altstopn_nan_and_clamp", function()
@@ -106,7 +111,7 @@ test("settings_table_identity_binding", function()
 			assertEq(reg.varType, type(reg.default), variable .. " varType matches its default")
 		end
 	end
-	assertEq(count, 12) -- every non-proxy setting registered exactly once
+	assertEq(count, 13) -- every non-proxy setting registered exactly once
 	assertTrue(S.settingsRegistry["ExactItemCount_altsExpandKey"].proxy,
 		"the list-all checkbox registers as a proxy setting")
 end)

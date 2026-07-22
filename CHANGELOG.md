@@ -5,6 +5,16 @@ All notable changes to Exact Item Count are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Recipe tooltips now also count the **item the recipe crafts**: below the recipe's own
+  count, a `Crafted items` line shows the product's total with its normal per-quality /
+  per-item-level breakdown — the number you're usually after when hovering a recipe. A
+  new option (*Crafted item on recipes*) shows it always, only while the modifier key is
+  held, or never.
+
 ## [1.2.0] - 2026-07-06
 
 ### Changed

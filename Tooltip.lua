@@ -22,6 +22,10 @@ local RequestLoadItemDataByID = C_Item.RequestLoadItemDataByID
 local GetCraftedQuality = C_TradeSkillUI.GetItemCraftedQualityByItemInfo
 local GetReagentQuality = C_TradeSkillUI.GetItemReagentQualityByItemInfo
 
+-- Item class 9 (Recipe) gates the crafted-product sub-section: only a recipe
+-- legitimately embeds another item's link in its tooltip data.
+local ITEM_CLASS_RECIPE = Enum.ItemClass and Enum.ItemClass.Recipe or 9
+
 -- itemIDs whose item data has already been requested this session (see the quality-path
 -- membership predicate below) -- one request per id is plenty to prime the client cache.
 local requestedLoad = {}
@@ -177,10 +181,11 @@ local function SourceSuffix(sources, opts)
 	return C(SUFFIX, " (") .. table.concat(parts, C(SUFFIX, " \194\183 ")) .. C(SUFFIX, ")")
 end
 
--- The section's lead line. `suffix` is an optional pre-colored tail -- the location
--- breakdown of the total, present whenever the total is above zero.
-local function AddTotal(tooltip, n, suffix)
-	tooltip:AddLine(C(ACCENT, "Total items owned: ") .. C(WHITE, tostring(n)) .. (suffix or ""))
+-- A sub-section's lead line: "<label>: N" plus an optional pre-colored location-suffix
+-- tail. The hovered item's sub-section leads with "Total items owned"; a recipe's
+-- crafted-product sub-section leads with "Crafted items".
+local function AddLead(tooltip, label, n, suffix)
+	tooltip:AddLine(C(ACCENT, label .. ": ") .. C(WHITE, tostring(n)) .. (suffix or ""))
 end
 
 -- Equippable gear: one row per item level, highest first. Crafting ranks share an itemID
@@ -287,6 +292,82 @@ local function ShowQualityBreakdown(tooltip, members, tiers, hoveredTier, hovere
 	end
 end
 
+-- One item's classified aggregate -- the shared computation behind both sub-sections a
+-- tooltip can carry (the hovered item's own, and a recipe's crafted product). The caller
+-- supplies whichever link legitimately belongs to the item: the hovered link, or the
+-- recipe's embedded product link.
+local function ComputeAggregate(itemID, link, filter)
+	-- Equippable items (weapons, armour, profession tools/accessories) get a per-ilvl
+	-- breakdown; the shared gate in Core.lua excludes bags and non-equippables (whose
+	-- equip loc is "INVTYPE_NON_EQUIP_IGNORE", not "").
+	local _, _, _, itemEquipLoc = GetItemInfoInstant(link or itemID)
+	local agg = { isGear = ns.IsGearEquipLoc(itemEquipLoc) }
+	if not agg.isGear then
+		agg.tier, agg.atlas = GetQuality(link, false)
+	end
+	if agg.tier then
+		-- Membership on top of the name join: a sibling counts only if its tier resolves
+		-- right now, so an id whose stored link can't produce a quality (cold cache -- an
+		-- alt-owned itemID this session has never seen -- or an unrelated same-name item)
+		-- contributes neither a row nor a total share; the data layer applies the same
+		-- all-or-nothing rule it uses for filtered-out sources. Resolved tiers are kept
+		-- so the renderer works from the exact set that built the total. Rejected ids get
+		-- their item data requested -- a later hover then includes them.
+		local tier, atlas = agg.tier, agg.atlas
+		local tiers = {}
+		local function accept(id, repLink)
+			if id == itemID then
+				-- The item this aggregate is for; its tier already resolved from the
+				-- link in hand, so it can never drop out of its own total.
+				tiers[id] = { tier, atlas }
+				return true
+			end
+			local t, a = GetQuality(repLink, false)
+			if t then
+				tiers[id] = { t, a }
+				return true
+			end
+			-- Prime the client item cache so a later hover can resolve this sibling. The
+			-- API's argument is string-typed (link or id), so pass the stored link; if
+			-- there is none, the name join came from GetItemNameByID, meaning the item
+			-- data is already cached and there is nothing to request.
+			if RequestLoadItemDataByID and repLink and not requestedLoad[id] then
+				requestedLoad[id] = true
+				RequestLoadItemDataByID(repLink)
+			end
+			return false
+		end
+		local _, members, combined = ns.GetByName(itemID, filter, accept)
+		agg.tiers, agg.members, agg.combined = tiers, members, combined
+		agg.total = combined.total
+	else
+		agg.entry = ns.Get(itemID, filter)
+		agg.total = agg.entry and agg.entry.total or 0
+	end
+	return agg
+end
+
+-- The lead line's location suffix. All three aggregate shapes route through here: a
+-- quality good's combined sources, a gear/plain item's entry sources, or no data at all
+-- (owned nowhere) -- SourceSuffix renders a missing or empty sources table as "".
+local function LeadSuffix(agg, opts)
+	return SourceSuffix((agg.combined or agg.entry or {}).sources, opts)
+end
+
+-- Breakdown rows for one aggregate; plain items have none. `hover` marks the hovered
+-- item's own sub-section ({ link, track }): it supplies the gold/white emphasis and the
+-- synthetic owned-0 row. nil hover (a recipe's product sub-section) renders every row
+-- dim with no synthetic row -- nothing there is "the variant under the cursor".
+local function ShowBreakdownRows(tooltip, agg, hover, opts)
+	if agg.isGear then
+		ShowGearBreakdown(tooltip, agg.entry, hover and hover.link or nil,
+			hover and hover.track or nil, opts)
+	elseif agg.tier then
+		ShowQualityBreakdown(tooltip, agg.members, agg.tiers,
+			hover and agg.tier or nil, hover and agg.atlas or nil, opts)
+	end
+end
+
 local function OnItemTooltip(tooltip, data)
 	-- Post-calls fire for EVERY tooltip inheriting GameTooltipTemplate (comparison and
 	-- chat-link popups, quest rewards, third-party frames) -- deliberately kept: counts
@@ -295,10 +376,22 @@ local function OnItemTooltip(tooltip, data)
 	if tooltip:IsForbidden() then return end
 	if not data then return end
 
+	-- One frame can be handed more than one TooltipData -- a recipe may surface its
+	-- embedded product's data through the same post-call. Render only for the frame's
+	-- primary data so the section can never appear twice on one frame. Ids are compared,
+	-- not tables (RefreshData rebuilds the data table), and the guard fails open: a frame
+	-- without the mixin method, or data without ids, renders as before.
+	if data.id and tooltip.GetTooltipData then
+		local primary = tooltip:GetTooltipData()
+		if primary and primary.id and primary.id ~= data.id then return end
+	end
+
 	-- `data.id` is the canonical id of the item actually being shown -- trust it over the
 	-- link. A recipe tooltip embeds its crafted product, so the displayed link can resolve
-	-- to that product (which you own 0 of) rather than the recipe; if the link disagrees
-	-- with data.id it isn't ours, so drop it (the count keys off the id regardless).
+	-- to that product rather than the recipe; the count keys off the id regardless. A
+	-- disagreeing link is never the hovered item's own: when the hovered item really is a
+	-- recipe (by item class) it's the crafted product -- kept, for the product sub-section
+	-- below -- and anything else is dropped outright.
 	local itemID = data.id
 	local link = data.hyperlink
 	if not link and TooltipUtil then
@@ -306,19 +399,17 @@ local function OnItemTooltip(tooltip, data)
 		link = displayed
 	end
 	local linkID = link and GetItemInfoInstant(link)
+	local productID, productLink
 	if itemID and linkID and linkID ~= itemID then
-		link = nil
+		local _, _, _, _, _, classID = GetItemInfoInstant(itemID)
+		if classID == ITEM_CLASS_RECIPE then
+			productID, productLink = linkID, link
+		end
+		link = nil -- the recipe's own classification stays keyed off the recipe id
 	elseif not itemID then
 		itemID = linkID
 	end
 	if not itemID then return end
-
-	local _, _, _, itemEquipLoc = GetItemInfoInstant(link or itemID)
-
-	-- Equippable items (weapons, armour, profession tools/accessories) get a per-ilvl
-	-- breakdown; the shared gate in Core.lua excludes bags and non-equippables (whose
-	-- equip loc is "INVTYPE_NON_EQUIP_IGNORE", not "").
-	local isGear = ns.IsGearEquipLoc(itemEquipLoc)
 
 	-- Settings shape every aggregate below (which sources count at all) and how it
 	-- renders. Both resolve the modifier key once, here -- everything downstream is
@@ -340,79 +431,49 @@ local function OnItemTooltip(tooltip, data)
 		topN = s and s.altsTopN or 2,
 	}
 
-	-- The total is needed before any line is added: a zero total can drop the whole
-	-- section (settings opt-in), and a hidden section must not leave a stray spacer.
-	local entry, members, combined, tiers
-	local tier, atlas
-	if not isGear then
-		tier, atlas = GetQuality(link, false)
+	-- Totals are needed before any line is added: hide-at-zero can drop either
+	-- sub-section (settings opt-in) or the whole section, and a hidden section must not
+	-- leave a stray spacer. On a recipe, the crafted product gets its own aggregate --
+	-- the count a recipe hover is usually really asking for ("do I need to craft
+	-- more?") -- gated by its tri-state; nil settings show it, matching the default.
+	local agg = ComputeAggregate(itemID, link, filter)
+	local productAgg
+	if productID and (not s or SourceEnabled(s.recipeProductMode, modDown)) then
+		productAgg = ComputeAggregate(productID, productLink, filter)
 	end
-	local total
-	if tier then
-		-- Membership on top of the name join: a sibling counts only if its tier resolves
-		-- right now, so an id whose stored link can't produce a quality (cold cache -- an
-		-- alt-owned itemID this session has never seen -- or an unrelated same-name item)
-		-- contributes neither a row nor a total share; the data layer applies the same
-		-- all-or-nothing rule it uses for filtered-out sources. Resolved tiers are kept
-		-- so the renderer works from the exact set that built the total. Rejected ids get
-		-- their item data requested -- a later hover then includes them.
-		tiers = {}
-		local function accept(id, repLink)
-			if id == itemID then
-				-- The hovered item opened this section; its tier already resolved from
-				-- the hovered link, so it can never drop out of its own total.
-				tiers[id] = { tier, atlas }
-				return true
-			end
-			local t, a = GetQuality(repLink, false)
-			if t then
-				tiers[id] = { t, a }
-				return true
-			end
-			-- Prime the client item cache so a later hover can resolve this sibling. The
-			-- API's argument is string-typed (link or id), so pass the stored link; if
-			-- there is none, the name join came from GetItemNameByID, meaning the item
-			-- data is already cached and there is nothing to request.
-			if RequestLoadItemDataByID and repLink and not requestedLoad[id] then
-				requestedLoad[id] = true
-				RequestLoadItemDataByID(repLink)
-			end
-			return false
-		end
-		_, members, combined = ns.GetByName(itemID, filter, accept)
-		total = combined.total
-	else
-		entry = ns.Get(itemID, filter)
-		total = entry and entry.total or 0
-	end
-	if total == 0 and s and s.hideZero then return end
+	local hideZero = s and s.hideZero
+	local showSelf = not (hideZero and agg.total == 0)
+	local showProduct = productAgg ~= nil and not (hideZero and productAgg.total == 0)
+	if not showSelf and not showProduct then return end
 
 	tooltip:AddLine(" ")
 
-	if isGear then
-		-- All equippable gear has an item level worth showing (it's in Blizzard's tooltip
-		-- even for plain dropped pieces), so owned gear gets the per-ilvl breakdown. A zero
-		-- total stands alone: every row under it would just restate the zero. The hovered
-		-- tooltip's own lines supply the upgrade track for the synthetic owned-0 row, which
-		-- has no stored group to read it from.
-		AddTotal(tooltip, total, entry and SourceSuffix(entry.sources, opts) or nil)
-		if total > 0 and showRows then
-			local hoveredTrack
-			local name, step, max = ns.ParseUpgradeTrack(data.lines)
-			if name then
-				hoveredTrack = { name = name, step = step, max = max }
+	-- A zero total stands alone: every row under it would just restate the zero. For
+	-- gear, the hovered tooltip's own lines supply the upgrade track for the synthetic
+	-- owned-0 row, which has no stored group to read it from.
+	if showSelf then
+		AddLead(tooltip, "Total items owned", agg.total, LeadSuffix(agg, opts))
+		if agg.total > 0 and showRows then
+			local hover = { link = link }
+			if agg.isGear then
+				local name, step, max = ns.ParseUpgradeTrack(data.lines)
+				if name then
+					hover.track = { name = name, step = step, max = max }
+				end
 			end
-			ShowGearBreakdown(tooltip, entry, link, hoveredTrack, opts)
+			ShowBreakdownRows(tooltip, agg, hover, opts)
 		end
-	elseif tier then
-		-- Quality good: tiers combined across name siblings, one row per tier.
-		AddTotal(tooltip, total, total > 0 and SourceSuffix(combined.sources, opts) or nil)
-		if total > 0 and showRows then
-			ShowQualityBreakdown(tooltip, members, tiers, tier, atlas, opts)
+	end
+
+	-- The product sub-section: a constant "Crafted items" label (the product's name is
+	-- already on screen in Blizzard's embedded product tooltip), its counts and rows
+	-- rendered by the same pipeline -- but with no hovered variant: nothing in it is
+	-- under the cursor, so no gold row and no synthetic owned-0 row.
+	if showProduct then
+		AddLead(tooltip, "Crafted items", productAgg.total, LeadSuffix(productAgg, opts))
+		if productAgg.total > 0 and showRows then
+			ShowBreakdownRows(tooltip, productAgg, nil, opts)
 		end
-	else
-		-- Plain item (no quality, no variable level): just the total.
-		AddTotal(tooltip, total, entry and SourceSuffix(entry.sources, opts) or nil)
 	end
 end
 
@@ -438,7 +499,7 @@ local function ModifierMatters(s)
 	return s.bankMode == "modifier" or s.warbandMode == "modifier"
 		or s.equippedMode == "modifier" or s.altsMode == "modifier"
 		or s.suffixMode == "modifier" or s.rowsMode == "modifier"
-		or s.bankMerge == "modifier"
+		or s.bankMerge == "modifier" or s.recipeProductMode == "modifier"
 		or (s.altsExpandKey and s.altsDetail ~= "all")
 end
 

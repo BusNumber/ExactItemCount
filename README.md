@@ -38,6 +38,17 @@ Total items owned: 130 (bags 40 · warband 60 · Liara 30)
   ★1: 40 (bags 40)
 ```
 
+**Recipes** — the recipe's own count, plus the count of the **item it crafts** (that's
+usually the number you're actually after — "do I need to craft more of these?"), with
+its full breakdown:
+
+```
+Total items owned: 1 (bags 1)
+Crafted items: 12 (bags 4 · Liara 8)
+  ★2: 8 (Liara 8)
+  ★1: 4 (bags 4)
+```
+
 **Everything else** — just the total:
 
 ```
@@ -57,7 +68,7 @@ If you own none anywhere, the section collapses to `Total items owned: 0`. And i
 3. The folder name must be **`ExactItemCount`** (it has to match `ExactItemCount.toc`).
 4. Restart WoW, or `/reload` if it's running. Make sure **Exact Item Count** is enabled in the AddOns list on the character-select screen.
 
-That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle each location — bank, warband bank, equipped items, other characters (always / only while a modifier key is held / never), plus a checkbox for whether to count your alts' equipped gear; compact-tooltip modes; and a list of your scanned characters with per-character hide and delete.
+That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle each location — bank, warband bank, equipped items, other characters (always / only while a modifier key is held / never), plus a checkbox for whether to count your alts' equipped gear; compact-tooltip modes, including whether recipe tooltips count the crafted item (always / only while the key is held / never); and a list of your scanned characters with per-character hide and delete.
 
 ## Scope (current version)
 
@@ -65,6 +76,7 @@ That's it. Options live under **Options → AddOns → Exact Item Count** (or `/
 - ✅ Equipped items — worn gear plus profession tools and accessories (updated as you change gear)
 - ✅ All of your characters — anything scanned while playing an alt shows up account-wide
 - ✅ Per-item-level breakdown with crafting-quality rank and upgrade-track progress
+- ✅ Recipes: the crafted item is counted too, with its own breakdown
 - ✅ Where-it-is breakdown on every count
 - ✅ Settings (display-only filtering — what's counted on screen, never what's cached)
 - ⬜ Amount of gold *(planned)*

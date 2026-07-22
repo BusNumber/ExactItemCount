@@ -110,20 +110,25 @@ end)
 test("recipe_id_link_disagreement_drops_link", function()
 	local productLink
 	loadAddon({ noPEW = true, db = function(S)
-		S.defineItem(310, { name = "Recipe: Feast" })      -- the hovered recipe
-		S.defineItem(311, { name = "Feast", reagent = 2 }) -- its embedded crafted product
+		S.defineItem(310, { name = "Recipe: Feast" })      -- NO classID: not recipe-class
+		S.defineItem(311, { name = "Feast", reagent = 2 }) -- the embedded item
 		productLink = S.link(311, "prod")
 		return H.db({ chars = { [H.OWN] = H.charStore({ bags = H.dbItems({
 			{ id = 310, count = 2 },
 			{ id = 311, count = 7, link = S.link(311, "owned") },
 		}) }) } })
 	end })
-	-- The tooltip data carries the recipe's id but resolves the embedded product's link:
-	-- the link must be dropped and the count keyed off the id -- otherwise the product's
-	-- quality would hijack the section onto the wrong item.
+	-- The tooltip data carries one id but resolves another item's link: the link must be
+	-- dropped and the count keyed off the id -- otherwise the embedded item's quality
+	-- would hijack the section onto the wrong item. And since the hovered item is NOT
+	-- recipe-class, the mismatch must not fabricate a product sub-section either.
 	local tip = H.hover({ id = 310, hyperlink = productLink })
 	H.assertSectionInvariant(tip)
 	assertEq(H.plainLines(tip)[2], "Total items owned: 2 (bags 2)")
+	for _, raw in ipairs(H.plainLines(tip)) do
+		assertTrue(raw:find("Crafted items", 1, true) == nil,
+			"a non-recipe id/link mismatch never grows a product sub-section")
+	end
 end)
 
 test("gear_id_without_link_tolerated", function()
@@ -374,6 +379,212 @@ test("quality_zero_total_collapse_and_hidezero", function()
 	assertEq(H.plainLines(tip), { " ", "Total items owned: 0" }) -- no tier rows at zero
 	ns.GetSettings().hideZero = true
 	assertEq(#H.hover({ id = 201, hyperlink = lS }).lines, 0)
+end)
+
+-- ---------------------------------------------------------------- recipe product
+
+-- Recipe world: recipe 310 (recipe-class) owned bags 1, crafting the two-tier "Feast" --
+-- silver (311) own bags 4, gold (312) alt Liara 8. Product total 12. rLink = the
+-- embedded product link a recipe tooltip resolves (the gold tier).
+local rLink
+local function recipeDB(S)
+	S.defineItem(310, { name = "Recipe: Feast", classID = 9 })
+	S.defineItem(311, { name = "Feast", reagent = 1 })
+	S.defineItem(312, { name = "Feast", reagent = 2 })
+	rLink = S.link(312, "prod")
+	return H.db({
+		chars = {
+			[H.OWN] = H.charStore({ bags = H.dbItems({
+				{ id = 310, count = 1 },
+				{ id = 311, count = 4, link = S.link(311, "s") },
+			}) }),
+			["Liara-RealmA"] = H.charStore({ bags = H.dbItems({
+				{ id = 312, count = 8, link = S.link(312, "g") },
+			}) }),
+		},
+	})
+end
+
+test("recipe_renders_recipe_line_then_product_section", function()
+	loadAddon({ noPEW = true, db = recipeDB })
+	local tip = H.hover({ id = 310, hyperlink = rLink })
+	H.assertSectionInvariant(tip) -- product rows sum to the product lead, per scope
+	assertEq(H.plainLines(tip), {
+		" ",
+		"Total items owned: 1 (bags 1)",
+		"Crafted items: 12 (bags 4" .. DOT .. "Liara 8)",
+		"  {Professions-ChatIcon-Quality-12-Tier2}: 8 (Liara 8)",
+		"  {Professions-ChatIcon-Quality-12-Tier1}: 4 (bags 4)",
+	})
+end)
+
+test("recipe_product_no_hovered_variant", function()
+	local pLink
+	loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(310, { name = "Recipe: Feast", classID = 9 })
+		S.defineItem(311, { name = "Feast", reagent = 1 })
+		S.defineItem(312, { name = "Feast", reagent = 2 })
+		pLink = S.link(312, "prod")
+		-- 313: alt-owned name sibling, never seen this session -- tier unresolvable.
+		local lCold = S.link(313, "cold", { name = "Feast" })
+		return H.db({ chars = {
+			[H.OWN] = H.charStore({ bags = H.dbItems({
+				{ id = 310, count = 1 },
+				{ id = 311, count = 4, link = S.link(311, "s") },
+			}) }),
+			["Liara-RealmA"] = H.charStore({ bags = H.dbItems({
+				{ id = 313, count = 9, link = lCold },
+			}) }),
+		} })
+	end })
+	local tip = H.hover({ id = 310, hyperlink = pLink })
+	H.assertSectionInvariant(tip)
+	local plain = H.plainLines(tip)
+	-- The embedded link is the gold tier, owned 0: nothing in the product block is under
+	-- the cursor, so no synthetic 0-row and no gold emphasis anywhere. The cold-cache
+	-- sibling stays all-or-nothing: it inflates neither the count nor the rows.
+	assertEq(plain[3], "Crafted items: 4 (bags 4)")
+	assertEq(plain[4], "  {Professions-ChatIcon-Quality-12-Tier1}: 4 (bags 4)")
+	assertEq(#plain, 4)
+	for _, raw in ipairs(tip.lines) do
+		assertTrue(raw:find("|cffffd100", 1, true) == nil, "no gold emphasis in the section")
+	end
+end)
+
+test("recipe_product_gear_breakdown", function()
+	local pLink
+	loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(320, { name = "Plans: Forged Chest", classID = 9 })
+		S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
+		pLink = S.link(101, "r5hi", { ilvl = 671, crafted = 5 })
+		return H.db({ chars = { [H.OWN] = H.charStore({
+			bags = H.dbItems({
+				{ id = 320, count = 1 },
+				{ id = 101, count = 2, ilvl = 645, link = S.link(101, "r4", { ilvl = 645, crafted = 4 }) },
+			}),
+			bank = H.dbItems({
+				{ id = 101, count = 1, ilvl = 658, link = S.link(101, "r5", { ilvl = 658, crafted = 5 }) },
+			}),
+		}) } })
+	end })
+	local tip = H.hover({ id = 320, hyperlink = pLink })
+	H.assertSectionInvariant(tip)
+	local plain = H.plainLines(tip)
+	assertEq(plain[2], "Total items owned: 1 (bags 1)")
+	assertEq(plain[3], "Crafted items: 3 (bags 2" .. DOT .. "bank 1)")
+	-- gear product: per-ilvl rows highest first, all dim -- and no synthetic row for the
+	-- embedded link's own 671 (owned 0), because nothing in the block is hovered
+	assertEq(plain[4], "  658 {Professions-ChatIcon-Quality-Tier5}: 1 (bank 1)")
+	assertEq(plain[5], "  645 {Professions-ChatIcon-Quality-Tier4}: 2 (bags 2)")
+	assertEq(#plain, 5)
+	for _, raw in ipairs(tip.lines) do
+		assertTrue(raw:find("|cffffd100", 1, true) == nil, "no gold emphasis in the product block")
+	end
+end)
+
+test("product_hovered_directly_single_section", function()
+	loadAddon({ noPEW = true, db = recipeDB })
+	local tip = H.hover({ id = 312, hyperlink = rLink }) -- the product itself, not the recipe
+	H.assertSectionInvariant(tip)
+	local plain = H.plainLines(tip)
+	assertEq(plain[2], "Total items owned: 12 (bags 4" .. DOT .. "Liara 8)")
+	assertTrue(tip.lines[3]:find("|cffffd100", 1, true) ~= nil, "hovered tier gold as usual")
+	for _, raw in ipairs(plain) do
+		assertTrue(raw:find("Crafted items", 1, true) == nil, "exactly one normal section")
+	end
+end)
+
+test("recipe_without_product_link_recipe_only", function()
+	local _, S = loadAddon({ noPEW = true, db = recipeDB })
+	-- No link at all (and no displayed-item fallback): the product is unknowable.
+	assertEq(H.plainLines(H.hover({ id = 310 })), { " ", "Total items owned: 1 (bags 1)" })
+	-- A link that agrees with the id (the recipe's own): likewise no product sub-section.
+	local tip = H.hover({ id = 310, hyperlink = S.link(310, "self") })
+	assertEq(H.plainLines(tip), { " ", "Total items owned: 1 (bags 1)" })
+end)
+
+test("recipe_product_mode_tristate", function()
+	local ns, S = loadAddon({ noPEW = true, db = recipeDB })
+	ns.GetSettings().recipeProductMode = "never"
+	assertEq(#H.hover({ id = 310, hyperlink = rLink }).lines, 2) -- recipe line only
+	ns.GetSettings().recipeProductMode = "modifier"
+	assertEq(#H.hover({ id = 310, hyperlink = rLink }).lines, 2) -- key up: hidden
+	S.keys.ALT = true
+	local tip = H.hover({ id = 310, hyperlink = rLink })
+	assertTrue(H.plainLines(tip)[3]:find("Crafted items", 1, true) ~= nil,
+		"product sub-section appears while the key is held")
+	H.assertSectionInvariant(tip)
+end)
+
+test("recipe_product_nil_settings_shows", function()
+	-- No settings layer loaded: the product sub-section defaults to shown, matching the
+	-- "always" default the sanitizer would fill.
+	loadAddon({ noPEW = true, files = { "Core.lua", "Tooltip.lua" }, db = recipeDB })
+	local tip = H.hover({ id = 310, hyperlink = rLink })
+	assertTrue(H.plainLines(tip)[3]:find("Crafted items", 1, true) ~= nil,
+		"nil settings render the product sub-section")
+	H.assertSectionInvariant(tip)
+end)
+
+test("recipe_hidezero_per_subsection", function()
+	local pOwned, pNone
+	local ns = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(310, { name = "Recipe: Feast", classID = 9 })    -- owned 1
+		S.defineItem(330, { name = "Recipe: Feast II", classID = 9 }) -- owned 0
+		S.defineItem(311, { name = "Feast", reagent = 1 })            -- owned 4
+		S.defineItem(206, { name = "Broth", reagent = 1 })            -- owned 0
+		pOwned = S.link(311, "p1")
+		pNone = S.link(206, "p2")
+		return H.db({ chars = { [H.OWN] = H.charStore({ bags = H.dbItems({
+			{ id = 310, count = 1 },
+			{ id = 311, count = 4, link = S.link(311, "s") },
+		}) }) } })
+	end })
+	ns.GetSettings().hideZero = true
+	-- both above zero: both sub-sections render
+	local plain = H.plainLines(H.hover({ id = 310, hyperlink = pOwned }))
+	assertEq(plain[2], "Total items owned: 1 (bags 1)")
+	assertEq(plain[3], "Crafted items: 4 (bags 4)")
+	-- recipe 0, product > 0: the zero recipe line drops, the product block stays
+	local tip = H.hover({ id = 330, hyperlink = pOwned })
+	H.assertSectionInvariant(tip) -- a lone "Crafted items" lead satisfies the invariant
+	assertEq(H.plainLines(tip), {
+		" ",
+		"Crafted items: 4 (bags 4)",
+		"  {Professions-ChatIcon-Quality-12-Tier1}: 4 (bags 4)",
+	})
+	-- recipe > 0, product 0: the recipe line stays, the zero product block drops
+	assertEq(H.plainLines(H.hover({ id = 310, hyperlink = pNone })),
+		{ " ", "Total items owned: 1 (bags 1)" })
+	-- both zero: nothing at all, not even the spacer
+	assertEq(#H.hover({ id = 330, hyperlink = pNone }).lines, 0)
+	-- hideZero off: both zeros render bare
+	ns.GetSettings().hideZero = false
+	assertEq(H.plainLines(H.hover({ id = 330, hyperlink = pNone })),
+		{ " ", "Total items owned: 0", "Crafted items: 0" })
+end)
+
+test("recipe_product_mode_modifier_matters", function()
+	local ns, S = loadAddon({ noPEW = true, db = recipeDB })
+	S.watched.GameTooltip.shown = true
+	-- everything else "always": only the product gating varies with the key
+	ns.GetSettings().recipeProductMode = "modifier"
+	S.pressModifier("LALT", true)
+	assertEq(S.watched.GameTooltip.refreshCount, 1)
+	ns.GetSettings().recipeProductMode = "always"
+	S.pressModifier("LALT", false)
+	assertEq(S.watched.GameTooltip.refreshCount, 1) -- nothing varies: no rebuild
+end)
+
+test("secondary_data_post_call_skipped", function()
+	loadAddon({ noPEW = true, db = recipeDB })
+	-- The same frame's post-call fires again with the embedded product's own data: the
+	-- frame's primary data disagrees, so the render is skipped -- never a second section.
+	assertEq(#H.hover({ id = 312, hyperlink = rLink }, { primary = { id = 310 } }).lines, 0)
+	-- Primary data matching the processed data renders normally (fakes WITHOUT a
+	-- GetTooltipData method render too -- every other test in this file proves that).
+	assertTrue(#H.hover({ id = 310, hyperlink = rLink }, { primary = { id = 310 } }).lines > 0,
+		"matching primary data renders")
 end)
 
 -- ---------------------------------------------------------------- suffix & settings

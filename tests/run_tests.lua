@@ -115,12 +115,18 @@ function H.strip(s)
 end
 
 -- Runs the captured tooltip post-call against a fake tooltip that records AddLine
--- calls; returns the fake (lines in tip.lines).
+-- calls; returns the fake (lines in tip.lines). opts.primary, when given, becomes the
+-- fake's GetTooltipData() result (the frame's primary data, for the secondary-data
+-- guard); absent, the fake has no GetTooltipData at all -- the frames-without-the-
+-- mixin path.
 function H.hover(data, opts)
 	assertTrue(stubs.itemPostCall, "no tooltip post-call registered -- was Tooltip.lua loaded?")
 	local tip = { lines = {}, forbidden = opts and opts.forbidden or false }
 	tip.IsForbidden = function(self) return self.forbidden end
 	tip.AddLine = function(self, text) self.lines[#self.lines + 1] = text end
+	if opts and opts.primary then
+		tip.GetTooltipData = function() return opts.primary end
+	end
 	stubs.itemPostCall(tip, data)
 	return tip
 end
@@ -170,27 +176,34 @@ function H.assertSuffixSums(raw)
 	end
 end
 
--- The section-wide invariant: the grand total equals the sum of the breakdown rows
--- (when rows rendered), and every suffixed line sums. Returns the total.
+-- The section-wide invariant: every lead line's count equals the sum of the breakdown
+-- rows under it (when rows rendered), and every suffixed line sums. A section can hold
+-- more than one scope -- a recipe renders its own "Total items owned:" lead plus a
+-- "Crafted items:" lead for the product -- and rows always belong to the nearest lead
+-- above them. Returns the FIRST lead's count (the hovered item's own total).
 function H.assertSectionInvariant(tip)
-	local totalLine, rowSum
+	local leads, rowSums, current = {}, {}, nil
 	for _, raw in ipairs(tip.lines) do
 		local s = H.strip(raw)
-		if s:find("^Total items owned:") then
-			totalLine = raw
+		if s:find("^Total items owned:") or s:find("^Crafted items:") then
+			current = #leads + 1
+			leads[current] = raw
 		elseif s:find("^  ") then -- breakdown rows are indented two spaces
+			assertTrue(current, "breakdown row before any lead line: " .. s)
 			local count = H.parseLine(raw)
 			assertTrue(count, "row with no count: " .. s)
-			rowSum = (rowSum or 0) + count
+			rowSums[current] = (rowSums[current] or 0) + count
 		end
 		H.assertSuffixSums(raw)
 	end
-	assertTrue(totalLine, "no total line rendered")
-	local total = H.parseLine(totalLine)
-	if rowSum then
-		assertEq(rowSum, total, "rows must sum to the grand total")
+	assertTrue(leads[1], "no lead line rendered")
+	for i, lead in ipairs(leads) do
+		if rowSums[i] then
+			assertEq(rowSums[i], (H.parseLine(lead)),
+				"rows must sum to their lead line: " .. H.strip(lead))
+		end
 	end
-	return total
+	return (H.parseLine(leads[1]))
 end
 
 -- DB-shape fixture builders (see the schema comment atop Core.lua).

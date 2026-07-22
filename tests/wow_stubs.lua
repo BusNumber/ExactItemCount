@@ -66,7 +66,8 @@ function M.advance(dt) M.now = M.now + dt end
 -- with no def and an id that was never defineItem()d models the cold cache: the
 -- bracket name still parses (LinkName fallback) but name/quality lookups fail.
 
--- def: { name=, equipLoc= (default "INVTYPE_NON_EQUIP_IGNORE"), ilvl=, crafted=, reagent= }
+-- def: { name=, equipLoc= (default "INVTYPE_NON_EQUIP_IGNORE"), ilvl=, crafted=,
+--        reagent=, classID= }
 function M.defineItem(id, def)
 	M.items[id] = def or {}
 	return id
@@ -190,6 +191,7 @@ function M.install()
 	_G.Enum = {
 		BagIndex = { Backpack = 0, ReagentBag = 5 },
 		BankType = { Character = 0, Account = 2 },
+		ItemClass = { Recipe = 9 },
 		TooltipDataType = { Item = 17 },
 	}
 	_G.INVSLOT_FIRST_EQUIPPED = 1
@@ -254,8 +256,9 @@ function M.install()
 		GetItemInfoInstant = function(idOrLink)
 			local id, item = itemFor(idOrLink)
 			if not id then return nil end
-			-- (itemID, itemType, itemSubType, itemEquipLoc, ...)
-			return id, nil, nil, (item and item.equipLoc) or "INVTYPE_NON_EQUIP_IGNORE"
+			-- (itemID, itemType, itemSubType, itemEquipLoc, icon, classID, subclassID)
+			return id, nil, nil, (item and item.equipLoc) or "INVTYPE_NON_EQUIP_IGNORE",
+				nil, item and item.classID or nil
 		end,
 		GetCurrentItemLevel = function(loc)
 			local s = stackAt(loc)

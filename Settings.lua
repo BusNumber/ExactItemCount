@@ -23,6 +23,8 @@ local DEFAULTS = {
 	                           -- this -- defaults fill missing keys, a stored choice stays.
 	suffixMode  = "always",    -- "always" | "modifier": the per-location suffix
 	rowsMode    = "always",    -- "always" | "modifier": the quality/ilvl breakdown rows
+	recipeProductMode = "always", -- "always" | "modifier" | "never": on recipe tooltips,
+	                           -- the "Crafted items" sub-section counting the product
 	altsDetail  = "topn",      -- "topn" | "all" | "total"
 	altsTopN    = 2,           -- alts named before the rest collapse (used by "topn")
 	altsExpandKey = false,     -- modifier held: list every alt, whatever altsDetail says
@@ -41,6 +43,7 @@ local ENUMS = {
 	modifier    = { SHIFT = true, ALT = true, CTRL = true },
 	suffixMode  = { always = true, modifier = true },
 	rowsMode    = { always = true, modifier = true },
+	recipeProductMode = TRI_STATE,
 	altsDetail  = { topn = true, all = true, total = true },
 	bankMerge   = { separate = true, modifier = true, merged = true },
 }
@@ -73,7 +76,7 @@ end
 
 local function TwoStateOptions()
 	local c = Settings.CreateControlTextContainer()
-	c:Add("always", "Always")
+	c:Add("always", "Always show")
 	c:Add("modifier", ("Only while %s is held"):format(ModLabel()))
 	return c:GetData()
 end
@@ -321,6 +324,9 @@ local function RegisterPanel()
 		"The dimmed per-location split after each count, like (bags 2 \194\183 bank 1).")
 	Settings.CreateDropdown(category, Register("rowsMode", "Quality & item level rows"), TwoStateOptions,
 		"The per-rank and per-item-level breakdown rows under the total.")
+	Settings.CreateDropdown(category, Register("recipeProductMode", "Crafted item on recipes"),
+		TriStateOptions,
+		"For recipes, also show the count of the crafted items the recipe is for.")
 	local altsDetailInit = Settings.CreateDropdown(category,
 		Register("altsDetail", "Other characters detail"), AltsDetailOptions,
 		"How other characters appear in the location suffix.")

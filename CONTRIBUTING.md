@@ -56,10 +56,14 @@ render through the real `TooltipDataProcessor` post-call into a fake tooltip who
 recorded lines the tests assert on. Each test boots a fresh addon world. What it locks
 are the DESIGN.md invariants:
 
-- the grand total equals the sum of the breakdown rows under **every** filter
-  combination, and every location suffix sums exactly to its line's count;
+- every lead line's count equals the sum of the breakdown rows under it, under
+  **every** filter combination (a recipe section carries two lead lines — the recipe's
+  own total and the `Crafted items` product line — each its own scope), and every
+  location suffix sums exactly to its line's count;
 - quality-sibling membership is all-or-nothing — a sibling counts toward the total only
   when its tier resolves into a row;
+- a recipe's product sub-section renders only for recipe-class items, is gated by its
+  tri-state, and never renders twice on one frame;
 - a bank that can't currently be read never wipes its stored snapshot;
 - the settings sanitizer round-trips: persisted `false` survives, junk values reset,
   and a DB-version rebuild carries `settings` over.
@@ -105,6 +109,28 @@ The reason this addon exists:
       the client hasn't loaded that item's data yet, the sibling may be missing from
       **both** the total and the rows on the first hover and appear on a later
       re-hover — it must never be counted in the total without its own row.
+
+### Recipes
+
+- [ ] Hover a **recipe in your bags** whose product you own: the recipe's own count
+      first, then `Crafted items: N` with the product's normal breakdown rows; the
+      product rows sum exactly to the `Crafted items` count; the section appears
+      **exactly once** (the embedded product tooltip must not add a duplicate).
+- [ ] Hover the **crafted product directly**: one normal section, no `Crafted items`
+      line, hovered highlight intact.
+- [ ] Hover a recipe in the **profession window's recipe list**: no duplicated or
+      misattributed section (the tooltip there may be set to the product itself — a
+      single normal product section is then the correct render).
+- [ ] **Chat-linked recipe** (click a recipe link in chat): the popup's link is
+      expected to be the recipe itself, so a recipe-only section (no `Crafted items`)
+      is correct there — not a bug.
+- [ ] Set *Crafted item on recipes* to *Only while held*: over an open recipe tooltip,
+      hold/release the modifier — the `Crafted items` block appears/vanishes in place,
+      never duplicated.
+- [ ] With **Hide when total is 0** on, hover an unowned recipe whose product you own:
+      only the `Crafted items` block shows (no `Total items owned: 0` line).
+- [ ] One-time API check: `/dump C_Item.GetItemInfoInstant(<recipe itemID>)` — confirm
+      classID (Recipe = 9) is the 6th return.
 
 ### Persistence lifecycle
 

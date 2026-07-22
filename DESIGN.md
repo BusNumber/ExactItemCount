@@ -108,11 +108,58 @@ sources, so every suffix still sums to its row.
 Food, recipes, lumber, sparks, treatises etc. have neither quality nor item level in
 Blizzard's tooltip, so they collapse to just the total, with the location suffix
 attached directly to it: `Total items owned: 5 (bags 1 · warband 3 · Liara 1)`.
+(Recipes then append a second sub-section for their crafted product — see
+[Recipes](#recipes).)
 
 Detection: non-equippable with no crafting/reagent quality (`GetQuality` returns nil).
 Many of these carry a hidden internal ilvl in the API (e.g. sparks); it is never
 displayed — the equip-loc gate, not the ilvl's existence, decides whether ilvl is
 meaningful.
+
+### Recipes
+
+A recipe is itself a plain item, and its own count renders exactly as above — that
+count still matters (a BoE world-drop recipe parked on an alt or in the warband bank).
+But the count a recipe hover is usually really asking about is the **crafted
+product's** ("do I need to craft more of these?"), so a second sub-section follows,
+built from the product link Blizzard embeds in every recipe tooltip:
+
+```
+Total items owned: 1 (bags 1)
+Crafted items: 12 (bags 4 · Liara 8)
+  <gold star>: 8 (Liara 8)
+  <silver star>: 4 (bags 4)
+```
+
+- **Recipe first, product second** — the hovered item leads, so `Total items owned`
+  keeps meaning the thing under the cursor, and the order matches Blizzard's own
+  recipe-tooltip layout (recipe info above the embedded product).
+- The product lead is the **constant label `Crafted items:`**, deliberately not the
+  product's name: the name is already on screen in Blizzard's embedded product
+  tooltip, and a constant label needs no name resolution — no fallback path, no
+  behavior to define when a name can't resolve.
+- The product's counts and rows come from the **same aggregate + render pipeline** as
+  a direct hover of the product (the shared helpers in `Tooltip.lua`), including the
+  all-or-nothing sibling rule — but with **no hovered variant**: nothing in the
+  product block is under the cursor, so no gold row and no synthetic owned-0 row.
+  Each lead line is its own invariant scope — `Crafted items` equals the sum of the
+  product rows below it — and the two sub-sections' numbers are never combined into
+  one figure.
+- **Gating**: a displayed link whose itemID disagrees with `data.id` marks a
+  candidate, but the product sub-section renders only when the hovered item's **item
+  class is Recipe** (classID 9) — any other id/link disagreement just drops the link
+  (see gotchas). `recipeProductMode` (a tri-state, see [Settings](#settings)) gates
+  the product sub-section only; the recipe's own line is never gated by it.
+- A cold-cache product (its quality tier unresolvable at hover time) degrades to a
+  plain `Crafted items: N` without the tier join and self-heals on a later hover —
+  the same failure mode and recovery the hovered path has.
+- `hideZero` applies **per sub-section**: a zero recipe count drops just the recipe
+  line (an unowned dropped recipe crafting an owned product shows only the
+  `Crafted items` block), a zero product count drops just the product block, and when
+  both drop nothing renders — not even the spacer.
+- A chat-linked recipe (ItemRefTooltip) usually carries the recipe's **own** link,
+  which agrees with `data.id` — no product link is in hand, so the popup legitimately
+  shows the recipe-only section.
 
 ### The location suffix
 
@@ -162,7 +209,9 @@ no tier split: a zero total implies every variant is zero. The "hovered variant 
 even at 0" rule applies only while the total is above zero (an unowned R5 row beside
 owned R4s; a 0-gold tier beside owned silver). The `hideZero` setting (off by default)
 drops the zero-total section entirely — checked **before** the spacer line so nothing
-strays.
+strays. On recipes, the two sub-sections follow these rules independently (see
+[Recipes](#recipes)): the whole section — spacer included — disappears only when both
+are dropped.
 
 ### Settings
 
@@ -187,13 +236,16 @@ scans never change with settings.
   doubles as the game's compare-items key, which would flip Shift-gated sources on every
   gear comparison; the default only reaches **fresh installs**, since `InitSettings`
   fills missing keys only and an existing install keeps its stored choice); the location suffix
-  and the breakdown rows can each independently be *Always* or *only-while-held*; alts
+  and the breakdown rows can each independently be *Always show* or *only-while-held*; alts
   detail mode with a *List all while key is held* checkbox (`altsExpandKey`, default
   off — the label says a generic "key" because checkbox names can't self-heal; see
   gotchas) that promotes any detail mode to every-alt-named while the key is down — it
   reads as checked **and disabled** while the mode is already *All*; the Top-N slider
-  is likewise disabled unless *Top N* is the selected mode; bank/warband suffix
-  merging; hide-at-zero ("Hide when total is 0").
+  is likewise disabled unless *Top N* is the selected mode; the crafted-product
+  sub-section on recipe tooltips is its own tri-state (`recipeProductMode`: *Always
+  show* / *Only while held* / *Never*, default always — a tri-state like the sources,
+  since "only while held" keeps the game's longest tooltips compact on demand);
+  bank/warband suffix merging; hide-at-zero ("Hide when total is 0").
 - Modifier state is read live per render **and** a `MODIFIER_STATE_CHANGED` watcher
   rebuilds the visible tooltips in place via `RefreshData()` (GameTooltip, the chat-link
   popup, and the two comparison tooltips — see gotchas), so holding the key updates an
@@ -261,6 +313,7 @@ ExactItemCountDB = {
     bankMode/warbandMode/equippedMode/altsMode = "always"|"modifier"|"never",
     modifier = "SHIFT"|"ALT"|"CTRL",
     suffixMode/rowsMode = "always"|"modifier",
+    recipeProductMode = "always"|"modifier"|"never",           -- "Crafted items" on recipes
     altsDetail = "topn"|"all"|"total", altsTopN = 2,           -- 1..10
     bankMerge = "separate"|"modifier"|"merged",                -- "modifier" = merged UNLESS held
     hiddenChars = { ["Name-NormalizedRealm"] = true },         -- true or absent, never false
@@ -352,12 +405,21 @@ a given line of code looks the way it does.
   carries both `id` (the canonical itemID actually being shown) and `hyperlink`. A
   **recipe** tooltip embeds its crafted product, so the displayed link
   (`data.hyperlink` / `TooltipUtil.GetDisplayedItem`) can resolve to that *product*
-  (owned 0) instead of the recipe. Key the count off `data.id`; if the resolved link's
-  itemID disagrees with `data.id`, it's the embedded item — drop the link (it's still
-  needed for quality/ilvl, but only when it matches). Both `id` and `hyperlink` are
-  **optional** in the struct, so an id can arrive with no link at all — every
-  link-consuming call must tolerate nil (the hovered-ilvl lookup only runs with a link
-  in hand).
+  instead of the recipe. Key the count off `data.id`; when the resolved link's itemID
+  disagrees with `data.id` **and** the hovered item's class is Recipe (classID, 6th
+  return of `GetItemInfoInstant`), that link is the crafted product — kept, feeding
+  the `Crafted items` sub-section; any other disagreeing link is dropped outright (it
+  must not classify the hovered item). Both `id` and `hyperlink` are **optional** in
+  the struct, so an id can arrive with no link at all — every link-consuming call must
+  tolerate nil (the hovered-ilvl lookup only runs with a link in hand).
+- **One frame can be handed more than one TooltipData** — a recipe may surface its
+  embedded product's data through the same post-call, which would append the section
+  twice. The render is skipped when the frame's own `GetTooltipData().id` disagrees
+  with the processed `data.id` (ids compared, not tables — `RefreshData` rebuilds the
+  data table). The guard **fails open**: a frame without the mixin method, or data
+  without ids, renders exactly as before — so the worst possible in-game outcome is
+  the pre-guard status quo, never a lost section. Whether the secondary fire actually
+  happens in-game is on the CONTRIBUTING checklist.
 - **"Gear" is detected via `itemEquipLoc`** (4th return of
   `C_Item.GetItemInfoInstant`), **not** item class. Profession equipment is item class
   19 (Profession), not Weapon/Armor — keying off class would miss the addon's primary
