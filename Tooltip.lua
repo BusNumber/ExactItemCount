@@ -93,6 +93,8 @@ local function BuildFilter(s)
 		bank = SourceEnabled(s.bankMode, down),
 		equipped = SourceEnabled(s.equippedMode, down),
 		warband = SourceEnabled(s.warbandMode, down),
+		mail = SourceEnabled(s.mailMode, down), -- own mailbox + own in-transit credits;
+		                                        -- alts' mail rides their per-alt count unconditionally
 		alts = SourceEnabled(s.altsMode, down),
 		altEquipped = s.altEquipped, -- whether alts' worn gear folds into their per-alt count
 		hiddenChars = s.hiddenChars,
@@ -100,14 +102,15 @@ local function BuildFilter(s)
 end
 
 -- Location breakdown for one count, pre-colored: " (bags 2 · bank 1 · warband 3 · Liara 1)".
--- Fixed order bags / bank(s) / warband / equipped / alts, alts by count descending (name
--- ascending as a stable tiebreak); zero-count locations never appear (the aggregator omits
--- them), so an empty sources table -- and the synthetic owned-0 rows that have none at all
--- -- yields "". The whole "bags N" token renders one step brighter than the rest: "how many
--- on me right now" is one glance, and no bright token anywhere reads as "none on you".
--- "equipped" (the current character's worn gear) sits at the dim base like bank/warband.
--- Bare bags/bank/equipped always mean the current character; alts are name + count only,
--- containers combined.
+-- Fixed order bags / bank(s) / warband / equipped / mail / alts, alts by count descending
+-- (name ascending as a stable tiebreak); zero-count locations never appear (the aggregator
+-- omits them), so an empty sources table -- and the synthetic owned-0 rows that have none at
+-- all -- yields "". The whole "bags N" token renders one step brighter than the rest: "how
+-- many on me right now" is one glance, and no bright token anywhere reads as "none on you".
+-- "equipped" (the current character's worn gear) and "mail" (this character's mailbox plus
+-- its uncollected in-transit sends) sit at the dim base like bank/warband -- nothing in a
+-- mailbox is "in hand". Bare bags/bank/equipped/mail always mean the current character;
+-- alts are name + count only, containers and mail combined.
 --
 -- `opts` is the per-render display shape; modifier state is already folded in by the
 -- caller, so this function never reads the keyboard:
@@ -140,6 +143,9 @@ local function SourceSuffix(sources, opts)
 	end
 	if sources.equipped then
 		Add(SUFFIX, "equipped " .. tostring(sources.equipped))
+	end
+	if sources.mail then
+		Add(SUFFIX, "mail " .. tostring(sources.mail))
 	end
 	-- The current character's own auction listings. Only auction-scope aggregates carry
 	-- this key (the scopes never mix -- see ForEachSourceStore), so the token appears
@@ -556,6 +562,7 @@ local KEY_TO_MOD = {
 local function ModifierMatters(s)
 	return s.bankMode == "modifier" or s.warbandMode == "modifier"
 		or s.equippedMode == "modifier" or s.altsMode == "modifier"
+		or s.mailMode == "modifier"
 		or s.suffixMode == "modifier" or s.rowsMode == "modifier"
 		or s.bankMerge == "modifier" or s.recipeProductMode == "modifier"
 		or s.auctionsMode == "modifier"

@@ -18,8 +18,8 @@ local function plainDB(S)
 	})
 end
 
--- All five source kinds for one plain item: bags 1 + bank 2 + warband 3 + equipped 4
--- + alts Liara 5, Bram 1. Total 16.
+-- All six source kinds for one plain item: bags 1 + bank 2 + warband 3 + equipped 4
+-- + mail 2 + alts Liara 5, Bram 1. Total 18.
 local function suffixDB(S)
 	S.defineItem(301, { name = "Acorn" })
 	return H.db({
@@ -28,6 +28,7 @@ local function suffixDB(S)
 				bags = H.dbItems({ { id = 301, count = 1 } }),
 				bank = H.dbItems({ { id = 301, count = 2 } }),
 				equipped = H.dbItems({ { id = 301, count = 4 } }),
+				mail = H.dbItems({ { id = 301, count = 2 } }),
 			}),
 			["Liara-RealmA"] = H.charStore({ bags = H.dbItems({ { id = 301, count = 5 } }) }),
 			["Bram-RealmA"] = H.charStore({ bags = H.dbItems({ { id = 301, count = 1 } }) }),
@@ -818,24 +819,49 @@ test("suffix_fixed_order_and_bags_brightness", function()
 	loadAddon({ noPEW = true, db = suffixDB })
 	local tip = H.hover({ id = 301 })
 	local count, tokens = H.parseLine(tip.lines[2])
-	assertEq(count, 16)
-	assertEq(tokens, { "bags 1", "bank 2", "warband 3", "equipped 4", "Liara 5", "Bram 1" })
+	assertEq(count, 18)
+	assertEq(tokens, { "bags 1", "bank 2", "warband 3", "equipped 4", "mail 2", "Liara 5", "Bram 1" })
 	-- the whole bags token sits one step brighter; the rest at the suffix base
 	assertTrue(tip.lines[2]:find("|cffa6a6a6bags 1|r", 1, true) ~= nil, "bags token brighter")
 	assertTrue(tip.lines[2]:find("|cff808080bank 2|r", 1, true) ~= nil, "bank at suffix base")
 	assertTrue(tip.lines[2]:find("|cff808080equipped 4|r", 1, true) ~= nil, "equipped at suffix base")
+	assertTrue(tip.lines[2]:find("|cff808080mail 2|r", 1, true) ~= nil, "mail at suffix base")
+end)
+
+test("gear_row_equipped_suffix_token", function()
+	-- The data layer's equipped emission is proven elsewhere; this locks the RENDERED
+	-- breakdown row carrying an "equipped N" token (previously only the total line's
+	-- suffix was asserted at row level).
+	local l620
+	loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(103, { name = "Worn Blade", equipLoc = "INVTYPE_WEAPON" })
+		l620 = S.link(103, "worn", { ilvl = 620 })
+		return H.db({ chars = { [H.OWN] = H.charStore({
+			bags = H.dbItems({
+				{ id = 103, count = 1, ilvl = 635, link = S.link(103, "spare", { ilvl = 635 }) },
+			}),
+			equipped = H.dbItems({ { id = 103, count = 1, ilvl = 620, link = l620 } }),
+		}) } })
+	end })
+	local tip = H.hover({ id = 103, hyperlink = l620 })
+	H.assertSectionInvariant(tip)
+	local plain = H.plainLines(tip)
+	assertEq(plain[3], "  ilvl 635: 1 (bags 1)")
+	assertEq(plain[4], "  ilvl 620: 1 (equipped 1)")
+	assertTrue(tip.lines[4]:find("|cff808080equipped 1|r", 1, true) ~= nil,
+		"row-level equipped token at the suffix base color")
 end)
 
 test("bank_merge_requires_both_tokens", function()
 	local ns = loadAddon({ noPEW = true, db = suffixDB })
 	ns.GetSettings().bankMerge = "merged"
 	local count, tokens = H.parseLine(H.hover({ id = 301 }).lines[2])
-	assertEq(count, 16)
-	assertEq(tokens, { "bags 1", "banks 5", "equipped 4", "Liara 5", "Bram 1" })
+	assertEq(count, 18)
+	assertEq(tokens, { "bags 1", "banks 5", "equipped 4", "mail 2", "Liara 5", "Bram 1" })
 	ns.GetSettings().bankMode = "never" -- a lone warband token never merges
 	count, tokens = H.parseLine(H.hover({ id = 301 }).lines[2])
-	assertEq(count, 14)
-	assertEq(tokens, { "bags 1", "warband 3", "equipped 4", "Liara 5", "Bram 1" })
+	assertEq(count, 16)
+	assertEq(tokens, { "bags 1", "warband 3", "equipped 4", "mail 2", "Liara 5", "Bram 1" })
 end)
 
 test("bank_merge_modifier_gated", function()
@@ -897,6 +923,7 @@ test("source_modes_matrix_holds_invariants", function()
 		{ key = "bankMode", tokens = { "bank " }, n = 2 },
 		{ key = "warbandMode", tokens = { "warband " }, n = 3 },
 		{ key = "equippedMode", tokens = { "equipped " }, n = 4 },
+		{ key = "mailMode", tokens = { "mail " }, n = 2 },
 		{ key = "altsMode", tokens = { "Liara ", "Bram " }, n = 6 },
 	}
 	local function hoverTotal()
@@ -909,18 +936,93 @@ test("source_modes_matrix_holds_invariants", function()
 		local total, line = hoverTotal()
 		-- A gated-off source vanishes from the total AND the suffix alike -- the section
 		-- invariant (checked inside hoverTotal) guarantees the two agree.
-		assertEq(total, 16 - c.n, c.key .. " never")
+		assertEq(total, 18 - c.n, c.key .. " never")
 		for _, tok in ipairs(c.tokens) do
 			assertTrue(line:find(tok, 1, true) == nil, tok .. "token absent under " .. c.key)
 		end
 		s[c.key] = "modifier"
 		S.keys.ALT = false
-		assertEq(hoverTotal(), 16 - c.n, c.key .. " gated, key up")
+		assertEq(hoverTotal(), 18 - c.n, c.key .. " gated, key up")
 		S.keys.ALT = true
-		assertEq(hoverTotal(), 16, c.key .. " gated, key down")
+		assertEq(hoverTotal(), 18, c.key .. " gated, key down")
 		S.keys.ALT = false
 		s[c.key] = "always"
 	end
+end)
+
+test("mail_total_includes_snapshot_and_pending", function()
+	loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = { [H.OWN] = H.charStore({
+			bags = H.dbItems({ { id = 301, count = 1 } }),
+			mail = H.dbItems({ { id = 301, count = 2 } }),
+			mailPending = { H.pending(900, { { id = 301, count = 4 } }) },
+		}) } })
+	end })
+	local tip = H.hover({ id = 301 })
+	H.assertSectionInvariant(tip)
+	-- Mailbox contents are unconditionally owned: unlike listings, they join the grand
+	-- total -- and the inbox snapshot plus the in-transit credit sum into ONE mail token.
+	assertEq(H.plainLines(tip)[2], "Total items owned: 7 (bags 1" .. DOT .. "mail 6)")
+end)
+
+test("alt_mail_ungated_by_own_mail_mode", function()
+	local ns = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = {
+			[H.OWN] = H.charStore({ bags = H.dbItems({ { id = 301, count = 1 } }) }),
+			["Liara-RealmA"] = H.charStore({
+				mail = H.dbItems({ { id = 301, count = 4 } }),
+				mailPending = { H.pending(900, { { id = 301, count = 2 } }) },
+			}),
+		} })
+	end })
+	local function line2() return H.plainLines(H.hover({ id = 301 }))[2] end
+	assertEq(line2(), "Total items owned: 7 (bags 1" .. DOT .. "Liara 6)")
+	-- The Mail tri-state gates the OWN mailbox only: an alt's mail (snapshot and
+	-- in-transit credits alike) is ordinary inventory inside its per-alt number.
+	ns.GetSettings().mailMode = "never"
+	assertEq(line2(), "Total items owned: 7 (bags 1" .. DOT .. "Liara 6)")
+	-- The alt gates still rule it out wholesale.
+	ns.GetSettings().altsMode = "never"
+	assertEq(line2(), "Total items owned: 1 (bags 1)")
+	ns.GetSettings().altsMode = "always"
+	ns.GetSettings().hiddenChars["Liara-RealmA"] = true
+	assertEq(line2(), "Total items owned: 1 (bags 1)")
+end)
+
+test("mail_absent_from_auction_section", function()
+	local ns = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = {
+			[H.OWN] = H.charStore({
+				mail = H.dbItems({ { id = 301, count = 2 } }),
+				auctions = H.dbItems({ { id = 301, count = 3 } }),
+			}),
+			["Liara-RealmA"] = H.charStore({ mail = H.dbItems({ { id = 301, count = 4 } }) }),
+		} })
+	end })
+	ns.GetSettings().altAuctions = true
+	local tip = H.hover({ id = 301 })
+	H.assertSectionInvariant(tip)
+	-- Mail is owned (in the total); listings are not (their own scope below). Neither
+	-- number bleeds into the other, and no mail count can appear in the auction block.
+	assertEq(H.plainLines(tip), {
+		" ",
+		"Total items owned: 6 (mail 2" .. DOT .. "Liara 4)",
+		"On auction: 3 (yours 3)",
+	})
+end)
+
+test("mail_mode_modifier_matters", function()
+	local ns, S = loadAddon({ noPEW = true, db = suffixDB })
+	S.watched.GameTooltip.shown = true
+	ns.GetSettings().mailMode = "modifier"
+	S.pressModifier("LALT", true)
+	assertEq(S.watched.GameTooltip.refreshCount, 1)
+	ns.GetSettings().mailMode = "always"
+	S.pressModifier("LALT", false)
+	assertEq(S.watched.GameTooltip.refreshCount, 1) -- nothing varies: no rebuild
 end)
 
 test("suffix_and_rows_modifier_gated", function()
@@ -949,8 +1051,8 @@ test("nil_settings_renders_full_default_display", function()
 	loadAddon({ noPEW = true, files = { "Core.lua", "Tooltip.lua" }, db = suffixDB })
 	local tip = H.hover({ id = 301 })
 	local count, tokens = H.parseLine(tip.lines[2])
-	assertEq(count, 16)
-	assertEq(#tokens, 6) -- suffix on, every source visible, top-2 default in force
+	assertEq(count, 18)
+	assertEq(#tokens, 7) -- suffix on, every source visible, top-2 default in force
 	H.assertSectionInvariant(tip)
 end)
 

@@ -240,7 +240,14 @@ function H.charStore(t)
 		bank = t.bank and H.snap(t.bank) or nil,
 		equipped = t.equipped and H.snap(t.equipped) or nil,
 		auctions = t.auctions and H.snap(t.auctions) or nil,
+		mail = t.mail and H.snap(t.mail) or nil,
+		mailPending = t.mailPending, -- raw array of { sentAt, items } batches (see H.pending)
 	}
+end
+
+-- One optimistic send-credit batch for a charStore's mailPending array.
+function H.pending(sentAt, stacks)
+	return { sentAt = sentAt, items = H.dbItems(stacks) }
 end
 
 -- t = { chars = { [key] = charStore }, warband = items, settings = table }
@@ -253,22 +260,25 @@ function H.db(t)
 	}
 end
 
--- Iterates the 32 display-filter combinations (bags is always true -- no setting).
+-- Iterates the 64 display-filter combinations (bags is always true -- no setting).
 function H.eachFilter(fn)
 	local bools = { true, false }
 	for _, bank in ipairs(bools) do
 		for _, warband in ipairs(bools) do
 			for _, equipped in ipairs(bools) do
-				for _, alts in ipairs(bools) do
-					for _, altEquipped in ipairs(bools) do
-						fn({
-							bags = true,
-							bank = bank,
-							warband = warband,
-							equipped = equipped,
-							alts = alts,
-							altEquipped = altEquipped,
-						})
+				for _, mail in ipairs(bools) do
+					for _, alts in ipairs(bools) do
+						for _, altEquipped in ipairs(bools) do
+							fn({
+								bags = true,
+								bank = bank,
+								warband = warband,
+								equipped = equipped,
+								mail = mail,
+								alts = alts,
+								altEquipped = altEquipped,
+							})
+						end
 					end
 				end
 			end

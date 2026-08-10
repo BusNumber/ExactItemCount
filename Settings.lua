@@ -15,6 +15,10 @@ local DEFAULTS = {
 	bankMode    = "always",    -- "always" | "modifier" | "never"
 	warbandMode = "always",
 	equippedMode = "always",   -- the current character's worn gear/profession tools
+	mailMode    = "always",    -- the current character's mailbox plus its uncollected
+	                           -- in-transit sends; alts' mail rides their per-alt total
+	                           -- unconditionally (ordinary countable inventory, unlike
+	                           -- worn gear -- no altMail switch)
 	altsMode    = "always",
 	altEquipped = true,        -- count other characters' worn gear too (folds into their total)
 	auctionsMode = "always",   -- the "On auction" sub-section (never part of the owned total)
@@ -44,6 +48,7 @@ local ENUMS = {
 	bankMode    = TRI_STATE,
 	warbandMode = TRI_STATE,
 	equippedMode = TRI_STATE,
+	mailMode    = TRI_STATE,
 	altsMode    = TRI_STATE,
 	auctionsMode = TRI_STATE,
 	modifier    = { SHIFT = true, ALT = true, CTRL = true },
@@ -271,6 +276,7 @@ local function BuildCharactersPanel(category)
 				and (hidden and " |cff4e7a4e(current)|r" or " |cff00ff00(current)|r") or ""))
 			row.age:SetText("bags " .. Ago(char.bags and char.bags.scannedAt)
 				.. " \194\183 bank " .. Ago(char.bank and char.bank.scannedAt)
+				.. " \194\183 mail " .. Ago(char.mail and char.mail.scannedAt)
 				.. " \194\183 auctions " .. Ago(char.auctions and char.auctions.scannedAt))
 			row.eye:GetNormalTexture():SetDesaturated(hidden)
 			row.eye:SetAlpha(hidden and 0.4 or 1)
@@ -319,6 +325,9 @@ local function RegisterPanel()
 	-- enabled state; this option governs alts (not this character's own equipped tri-state),
 	-- so it stays enabled regardless -- hence a constant true.
 	altEquippedInit:SetParentInitializer(equippedInit, function() return true end)
+	Settings.CreateDropdown(category, Register("mailMode", "Mail"), TriStateOptions,
+		"Items in this character's mailbox (snapshot taken at the mailbox), plus items it"
+			.. " has mailed to your other characters that haven't been collected yet.")
 	Settings.CreateDropdown(category, Register("altsMode", "Other characters"), TriStateOptions,
 		"Items on every other scanned character, bags and bank combined."
 			.. " Manage individual characters on the Characters page.")

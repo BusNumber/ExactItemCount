@@ -5,6 +5,23 @@ All notable changes to Exact Item Count are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-09
+
+### Added
+
+- Items in the **mail** are now counted: your mailbox is snapshotted whenever you open
+  it, shows as a `mail` entry in every location breakdown, and — unlike auction
+  listings — is part of `Total items owned`. Counts update live while you loot mail.
+- Mailing items to **your own characters** credits them to the recipient immediately:
+  from the moment the send succeeds, the items count under the recipient's name, and
+  the recipient's own tooltips show them as `mail` until collected. The credit is
+  replaced by the real inbox contents the next time that character opens a mailbox,
+  and expires on its own after 31 days (unclaimed mail auto-returns at 30).
+- A stranger's **Cash-on-Delivery** package is not counted until you pay for it; COD
+  mail between your own characters counts throughout.
+- New *Mail* location setting.
+- The Characters page's scan-age line now includes `mail`.
+
 ## [1.3.0] - 2026-07-21
 
 ### Added
@@ -91,6 +108,7 @@ Initial public release. For **Midnight, patch 12.0.5** (retail).
 - **Live tooltip refresh** — holding or releasing the modifier key over an open tooltip
   updates the counts in place.
 
+[1.4.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.4.0
 [1.3.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.3.0
 [1.2.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.2.0
 [1.1.1]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.1.1

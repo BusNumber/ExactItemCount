@@ -49,8 +49,15 @@ local function resetState()
 	M.bankUsable = {}         -- [Enum.BankType.*] = bool (C_Bank.CanUseBank)
 	M.ownedAuctions = nil     -- GetOwnedAuctions result; nil = no result set in hand
 	M.fullOwnedResults = true -- HasFullOwnedAuctionResults (false = partial pages)
+	M.inbox = {}              -- messages: { sender=, cod=, money=, attachments={stack,...} }
+	M.inboxTotal = nil        -- GetInboxNumItems 2nd return (server total); nil = #M.inbox
+	M.canCheckInbox = true    -- C_Mail.CanCheckInbox (false = server throttle)
+	M.sendSlots = {}          -- [slot] = stack, the outgoing attachment slots
+	M.sendSlotsClearOnSend = false -- true: SendMail empties the slots BEFORE hooks run,
+	                          -- modeling "slots unreadable inside a post-hook"
 	M.displayedLink = nil     -- TooltipUtil.GetDisplayedItem fallback result
-	M.calls = { bagTip = 0, invTip = 0, queryOwned = 0, requestLoad = {} }
+	M.calls = { bagTip = 0, invTip = 0, inboxTip = 0, sendTip = 0,
+		queryOwned = 0, checkInbox = 0, requestLoad = {} }
 	M.settingsRegistry = {}   -- [variable] = capture from Settings.Register*Setting
 	M.valueChangedCallbacks = {}
 	M.itemPostCall = nil      -- the tooltip post-call Tooltip.lua registered (test entry point)
@@ -139,6 +146,30 @@ function M.setBank(bankType, tabIDs)
 	M.bankUsable[bankType] = true
 end
 
+-- Replaces the inbox with `messages` ({ sender=, cod=, money=, attachments = { stack,
+-- ... } }), auto-building attachment links like setContainer does. Mail has no
+-- ItemLocation, so a stack's ilvl only reaches the scan through its link -- the
+-- auto-link embeds it.
+function M.setInbox(messages)
+	messages = messages or {}
+	for i, msg in ipairs(messages) do
+		for j, a in ipairs(msg.attachments or {}) do
+			if a.link == nil then
+				a.link = M.link(a.id, "m" .. i .. "a" .. j, a.ilvl and { ilvl = a.ilvl } or nil)
+			end
+		end
+	end
+	M.inbox = messages
+end
+
+-- One outgoing attachment slot; auto-links like setEquipped (ilvl embedded, see setInbox).
+function M.setSendSlot(slot, stack)
+	if stack and stack.link == nil then
+		stack.link = M.link(stack.id, "send" .. slot, stack.ilvl and { ilvl = stack.ilvl } or nil)
+	end
+	M.sendSlots[slot] = stack
+end
+
 -- The stack's TooltipData lines: explicit tipLines win; a `track` synthesizes the
 -- English-format upgrade line (locale-shape tests pass raw tipLines instead). A leading
 -- filler line makes sure ParseUpgradeTrack actually iterates.
@@ -196,9 +227,12 @@ function M.install()
 		ItemClass = { Recipe = 9 },
 		TooltipDataType = { Item = 17 },
 		AuctionStatus = { Active = 0, Sold = 1 },
+		PlayerInteractionType = { MailInfo = 17 }, -- the live client's value
 	}
 	_G.INVSLOT_FIRST_EQUIPPED = 1
 	_G.INVSLOT_LAST_EQUIPPED = 19
+	_G.ATTACHMENTS_MAX_RECEIVE = 16 -- Blizzard-Lua globals, mirrored with live values
+	_G.ATTACHMENTS_MAX_SEND = 12
 	-- Consumed once at Core.lua load into trackPattern; locale-shape tests override this
 	-- in loadAddon's setup hook, BEFORE the files load.
 	_G.ITEM_UPGRADE_TOOLTIP_FORMAT_STRING = "Upgrade Level: %s %d/%d"
@@ -312,6 +346,17 @@ function M.install()
 			local s = M.equipped[slot]
 			return s and { lines = tipLinesFor(s) } or nil
 		end,
+		GetInboxItem = function(i, j)
+			M.calls.inboxTip = M.calls.inboxTip + 1
+			local msg = M.inbox[i]
+			local a = msg and msg.attachments and msg.attachments[j]
+			return a and { lines = tipLinesFor(a) } or nil
+		end,
+		GetSendMailItem = function(slot)
+			M.calls.sendTip = M.calls.sendTip + 1
+			local s = M.sendSlots[slot]
+			return s and { lines = tipLinesFor(s) } or nil
+		end,
 	}
 
 	_G.GetInventoryItemID = function(_, slot)
@@ -336,6 +381,63 @@ function M.install()
 		GetOwnedAuctions = function() return M.ownedAuctions end,
 		HasFullOwnedAuctionResults = function() return M.fullOwnedResults end,
 	}
+
+	-- Mail. The stubs encode the exact return shapes the scan relies on -- notably
+	-- GetInboxNumItems' (downloaded, serverTotal) pair and GetInboxItem's quality
+	-- return hardcoded to -1 (the documented live bug): any production code that ever
+	-- READS the quality gets a nonsense value and fails a test.
+	_G.CheckInbox = function() M.calls.checkInbox = M.calls.checkInbox + 1 end
+	_G.C_Mail = {
+		CanCheckInbox = function() return M.canCheckInbox, M.canCheckInbox and 0 or 30 end,
+	}
+	_G.GetInboxNumItems = function()
+		return #M.inbox, M.inboxTotal or #M.inbox
+	end
+	_G.GetInboxHeaderInfo = function(i)
+		local msg = M.inbox[i]
+		if not msg then return nil end
+		local n = msg.attachments and #msg.attachments or 0
+		-- (packageIcon, stationeryIcon, sender, subject, money, CODAmount, daysLeft,
+		--  itemCount-or-nil, wasRead, wasReturned, textCreated, canReply, isGM)
+		return nil, nil, msg.sender, msg.subject or "", msg.money or 0, msg.cod or 0,
+			msg.daysLeft or 30, n > 0 and n or nil
+	end
+	_G.GetInboxItem = function(i, j)
+		local msg = M.inbox[i]
+		local a = msg and msg.attachments and msg.attachments[j]
+		if not a then return nil end
+		local item = M.items[a.id]
+		-- (name, itemID, texture, count, quality, canUse) -- quality is ALWAYS -1
+		return (item and item.name) or ("Item" .. tostring(a.id)), a.id, nil, a.count, -1, 1
+	end
+	_G.GetInboxItemLink = function(i, j)
+		local msg = M.inbox[i]
+		local a = msg and msg.attachments and msg.attachments[j]
+		return (a and a.link ~= false) and a.link or nil
+	end
+	_G.GetSendMailItem = function(slot)
+		local s = M.sendSlots[slot]
+		if not s then return nil end
+		local item = M.items[s.id]
+		-- (name, itemID, texture, count, quality) -- no canUse, same bugged quality
+		return (item and item.name) or ("Item" .. tostring(s.id)), s.id, nil, s.count, -1
+	end
+	_G.GetSendMailItemLink = function(slot)
+		local s = M.sendSlots[slot]
+		return (s and s.link ~= false) and s.link or nil
+	end
+	_G.SendMail = function()
+		-- The live client's behavior here is the design's open question; the knob models
+		-- the hostile answer (slots already cleared when post-hooks run).
+		if M.sendSlotsClearOnSend then M.sendSlots = {} end
+	end
+	_G.hooksecurefunc = function(name, fn)
+		local orig = _G[name]
+		_G[name] = function(...)
+			orig(...)
+			fn(...)
+		end
+	end
 
 	_G.C_AddOns = {
 		GetAddOnMetadata = function(_, field) return M.metadata[field] end,

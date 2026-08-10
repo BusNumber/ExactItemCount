@@ -21,6 +21,13 @@ local addonName, ns = ...
 --         bank     = { scannedAt = <epoch>, items = <items> },
 --         equipped = { scannedAt = <epoch>, items = <items> },     -- currently-worn gear/tools
 --         auctions = { scannedAt = <epoch>, items = <items> },     -- active AH listings
+--         mail     = { scannedAt = <epoch>, items = <items> },     -- inbox snapshot (taken at the mailbox)
+--         mailPending = { { sentAt = <epoch>, items = <items> }, ... },
+--                               -- optimistic in-transit credits: appended by the SENDING
+--                               -- character's session on a successful send to this
+--                               -- character, cleared whole by this character's own next
+--                               -- full inbox scan, pruned after 31 days (mail auto-
+--                               -- returns at 30, so the game guarantees it has moved)
 --       },
 --     },
 --     settings = { ... },   -- account-wide display settings; owned by Settings.lua
@@ -37,6 +44,9 @@ local db       -- ExactItemCountDB, set at ADDON_LOADED
 local charKey  -- "Name-NormalizedRealm"; resolved lazily (realm is unreliable before PLAYER_ENTERING_WORLD)
 local bankOpen = false
 local ahOpen = false
+local mailOpen = false
+local sendSnapshot -- outgoing attachment slots as an items table, rebuilt on MAIL_SEND_INFO_UPDATE
+local pendingSend  -- { recipientKey, items } stashed by the SendMail hook until the send resolves
 
 -- Bag range for the player's inventory: backpack (0), the four carried bags (1-4)
 -- and the reagent bag (5). These Enum values are contiguous, so a numeric loop works.
@@ -72,11 +82,35 @@ local GetInventoryItemLink    = GetInventoryItemLink  -- global; (unit, slot) ->
 local QueryOwnedAuctions      = C_AuctionHouse and C_AuctionHouse.QueryOwnedAuctions
 local GetOwnedAuctions        = C_AuctionHouse and C_AuctionHouse.GetOwnedAuctions
 local HasFullOwnedAuctionResults = C_AuctionHouse and C_AuctionHouse.HasFullOwnedAuctionResults
+local CheckInbox              = CheckInbox            -- globals; the mail API was never C_-namespaced
+local GetInboxNumItems        = GetInboxNumItems
+local GetInboxHeaderInfo      = GetInboxHeaderInfo
+local GetInboxItem            = GetInboxItem
+local GetInboxItemLink        = GetInboxItemLink
+local GetSendMailItem         = GetSendMailItem
+local GetSendMailItemLink     = GetSendMailItemLink
+local CanCheckInbox           = C_Mail and C_Mail.CanCheckInbox
+local GetInboxItemTooltip     = C_TooltipInfo and C_TooltipInfo.GetInboxItem
+local GetSendMailItemTooltip  = C_TooltipInfo and C_TooltipInfo.GetSendMailItem
 
 -- Non-active listings (sold, awaiting collection) are excluded from the auction scan:
 -- the item is gone, its proceeds arrive as gold via mail. An absent status field must
 -- never drop a listing, so the comparison is against the Active value, not "truthy".
 local AUCTION_STATUS_ACTIVE = Enum.AuctionStatus and Enum.AuctionStatus.Active or 0
+
+-- Mailbox open/close is driven by the interaction manager (Blizzard's own MailFrame
+-- registers neither MAIL_SHOW nor the dead-since-10.0 MAIL_CLOSED); both legacy events
+-- stay registered as defensive belts. The numeric fallback mirrors AUCTION_STATUS_ACTIVE.
+local INTERACTION_MAILBOX = Enum.PlayerInteractionType and Enum.PlayerInteractionType.MailInfo or 17
+
+-- Attachment-slot bounds. These are Lua globals defined in Blizzard_MailFrame (not C
+-- constants), so the fallbacks are load-order insurance, not paranoia.
+local MAX_MAIL_RECEIVE = ATTACHMENTS_MAX_RECEIVE or 16
+local MAX_MAIL_SEND    = ATTACHMENTS_MAX_SEND or 12
+
+-- Optimistic send credits older than this describe mail the game guarantees has moved
+-- (auto-return happens at 30 days); a day of slack avoids clock-skew edge cases.
+local MAIL_PENDING_SECONDS = 31 * 24 * 60 * 60
 
 -- Equip locations that do NOT count as gear. Non-equippable items return
 -- "INVTYPE_NON_EQUIP_IGNORE" from GetItemInfoInstant -- the token was renamed from
@@ -236,6 +270,30 @@ local function EnsureChar()
 	return char
 end
 
+-- Resolves a player-typed or API-supplied character name ("liara", "Liara-RealmA",
+-- "Liara-Realm A") to the exact db.chars key it denotes, or nil for a stranger. No realm
+-- means the own realm; a typed realm is normalized the way GetNormalizedRealmName is
+-- (spaces/hyphens/apostrophes stripped); the match is case-insensitive. Character names
+-- cannot contain "-", so the split at the first hyphen is exact. Only ever RETURNS
+-- existing keys -- the send-crediting path relies on that (it never creates entries).
+-- The pairs() sweep is one pass over a tiny roster, once per send / COD header.
+local function KnownCharKey(who)
+	if not (db and type(who) == "string" and who ~= "") then return nil end
+	local name, realm = who:match("^([^-]+)%-(.+)$")
+	if name then
+		realm = realm:gsub("[%s%-']", "")
+	else
+		name = who
+		realm = GetNormalizedRealmName()
+		if not realm then return nil end
+	end
+	local target = (name .. "-" .. realm):lower()
+	for key in pairs(db.chars) do
+		if key:lower() == target then return key end
+	end
+	return nil
+end
+
 local function ScanBags()
 	local char = EnsureChar()
 	if not char then return end
@@ -326,22 +384,120 @@ local function ScanAuctions()
 	char.auctions = { scannedAt = time(), items = items }
 end
 
+-- The inbox downloads to the client in pages: GetInboxNumItems() returns (numItems,
+-- totalItems) where numItems is what is downloaded and indexable (1..numItems) and
+-- totalItems is the server-side total -- the client shows at most 100 messages, and
+-- past that only removing mail surfaces the rest. totalItems > numItems therefore means
+-- "this scan cannot see everything": keep the stored snapshot (nil, the ReadableBankTabs
+-- convention). No refetch loop here -- Blizzard's own InboxFrame re-issues CheckInbox()
+-- until the two converge, firing MAIL_INBOX_UPDATE each round, which rescans. A complete
+-- EMPTY inbox is a real result: 0 legitimately swaps in an empty snapshot.
+local function ReadableInboxCount()
+	if not GetInboxNumItems then return nil end
+	local numItems, totalItems = GetInboxNumItems()
+	if not numItems then return nil end
+	if totalItems and totalItems > numItems then return nil end
+	return numItems
+end
+
+-- A pending send-credit batch that is still plausibly in a mailbox somewhere. Checked at
+-- read time as well as at the load-time prune, so a batch that crosses the 31-day line
+-- mid-session drops out of the counts without a reload. Shape-checks defend against
+-- hand-edited SavedVariables (the batches are the one array-of-tables in the schema).
+local function FreshPending(batch, now)
+	return type(batch) == "table"
+		and type(batch.sentAt) == "number" and (now - batch.sentAt) < MAIL_PENDING_SECONDS
+		and type(batch.items) == "table"
+end
+
+-- The character's mailbox. Readable only while the mailbox is open and only as far as
+-- the inbox has downloaded (see ReadableInboxCount); scans are wholesale, never
+-- incremental -- mail can vanish without any "taken" event (a recipient can delete a
+-- mail with attachments, returns/refusals move items silently), so reconciliation beats
+-- bookkeeping. A COD package from a stranger is NOT owned until paid for, so its
+-- attachments are skipped -- unless the sender is one of this account's scanned
+-- characters (own goods moving between alts stay owned throughout). Attached money is
+-- ignored: gold is not an item. The per-attachment quality return of GetInboxItem is a
+-- long-documented bug (-1) and is never read; C_TooltipInfo.GetInboxItem supplies
+-- upgrade-track lines through the standard gear-gated fetch. A successful swap also
+-- clears this character's own mailPending: the inbox now reflects reality (uncollected
+-- sends are IN it, collected ones are in bags), so the optimistic credits are done.
+local function ScanMail()
+	local char = EnsureChar()
+	if not char then return end
+	local n = ReadableInboxCount()
+	if not n then return end
+	local items = {}
+	for i = 1, n do
+		-- (packageIcon, stationeryIcon, sender, subject, money, CODAmount, daysLeft, itemCount)
+		local _, _, sender, _, _, cod, _, itemCount = GetInboxHeaderInfo(i)
+		local counted = not (cod and cod > 0) or KnownCharKey(sender) ~= nil
+		if counted and itemCount then -- itemCount is nil for item-less mail: skip the slot loop
+			for j = 1, MAX_MAIL_RECEIVE do
+				-- (name, itemID, texture, count, quality, canUse) -- quality is bugged (-1)
+				local _, id, _, qty = GetInboxItem(i, j)
+				local link = GetInboxItemLink and GetInboxItemLink(i, j) or nil
+				if not id and link then
+					id = GetItemInfoInstant(link)
+				end
+				if id then
+					local ilvl = link and GetDetailedItemLevelInfo(link) or 0
+					RecordStack(items, id, qty or 1, link, ilvl or 0,
+						GetInboxItemTooltip and function() return GetInboxItemTooltip(i, j) end)
+				end
+			end
+		end
+	end
+	char.mail = { scannedAt = time(), items = items }
+	char.mailPending = nil
+end
+
+-- The outgoing attachment slots as an items table, or nil when every slot is empty (or
+-- the API is absent) -- so callers can tell "nothing readable" from "a plain letter".
+-- There is no count API for send attachments: the loop covers every slot and skips nils,
+-- the way Blizzard's own send code iterates.
+local function ScanSendSlots()
+	if not GetSendMailItem then return nil end
+	local items, any = {}, false
+	for j = 1, MAX_MAIL_SEND do
+		-- (name, itemID, texture, count, quality) -- same bugged quality, never read
+		local _, id, _, qty = GetSendMailItem(j)
+		local link = GetSendMailItemLink and GetSendMailItemLink(j) or nil
+		if not id and link then
+			id = GetItemInfoInstant(link)
+		end
+		if id then
+			any = true
+			local ilvl = link and GetDetailedItemLevelInfo(link) or 0
+			RecordStack(items, id, qty or 1, link, ilvl or 0,
+				GetSendMailItemTooltip and function() return GetSendMailItemTooltip(j) end)
+		end
+	end
+	return any and items or nil
+end
+
 -- Visits every source store as fn(items, tag, altName) -- tag is
--- "bags"/"bank"/"equipped"/"warband" for the current character (altName nil), alts get
--- altName (tag nil) with bags, bank and equipped all visited so they combine into one
--- per-alt number. Visit order doubles as representative precedence (first non-nil
--- link/track wins downstream): own bags, own bank, own equipped, warband, then alts
--- sorted by key for determinism.
+-- "bags"/"bank"/"equipped"/"mail"/"warband" for the current character (altName nil),
+-- alts get altName (tag nil) with bags, bank, equipped and mail all visited so they
+-- combine into one per-alt number. The "mail" tag is emitted for the inbox snapshot AND
+-- for each fresh mailPending batch (AddSource accumulates multiple visits under one
+-- tag), so the token/fold always shows their sum. Visit order doubles as representative
+-- precedence (first non-nil link/track wins downstream): own bags, own bank, own
+-- equipped, own mail (+pending), warband, then alts sorted by key for determinism.
 --
 -- `filter` is the display layer's source selection (nil = visit everything):
---   { bags = bool, bank = bool, equipped = bool, warband = bool, alts = bool,
---     altEquipped = bool, hiddenChars = { ["Name-NormalizedRealm"] = true } }
+--   { bags = bool, bank = bool, equipped = bool, mail = bool, warband = bool,
+--     alts = bool, altEquipped = bool,
+--     hiddenChars = { ["Name-NormalizedRealm"] = true } }
 -- `equipped` gates only the current character's worn gear; `altEquipped` gates whether
--- alts' worn gear folds into their per-alt number. Falsy flags skip that store wholesale;
--- hiddenChars skips individual alts and must be checked here -- the callback only ever
--- sees the realm-stripped display name, never the full key. Filtering at the iteration
--- root is what keeps "the total equals the sum of everything displayed" true by
--- construction in every aggregate built on top.
+-- alts' worn gear folds into their per-alt number. `mail` likewise gates only the
+-- current character's mailbox: alts' mail rides their per-alt number unconditionally
+-- (like their bags and bank -- it is ordinary countable inventory, unlike worn gear, so
+-- there is no altMail switch). Falsy flags skip that store wholesale; hiddenChars skips
+-- individual alts and must be checked here -- the callback only ever sees the
+-- realm-stripped display name, never the full key. Filtering at the iteration root is
+-- what keeps "the total equals the sum of everything displayed" true by construction in
+-- every aggregate built on top.
 --
 -- `filter.auctionsOnly` flips the visit set to the auction scope: ONLY auction stores --
 -- the own character's char.auctions as tag "auctions", each alt's folded into its
@@ -350,7 +506,10 @@ end
 -- visits auction stores at all: listings are conditionally owned (yours only if the
 -- listing fails), so they must not leak into any "Total items owned" aggregate -- the
 -- tooltip layer renders them as their own "On auction" sub-section instead, built from
--- the same aggregates through this mode.
+-- the same aggregates through this mode. Mail is the opposite call: mailbox contents
+-- ARE unconditionally owned (only your own collecting moves them; even the 30-day
+-- auto-return keeps them in the family), so mail sits in the normal visit set and the
+-- auction scope never touches it.
 local function ForEachSourceStore(fn, filter)
 	if not db then return end
 	local auctionsOnly = filter ~= nil and filter.auctionsOnly
@@ -363,6 +522,15 @@ local function ForEachSourceStore(fn, filter)
 			if (not filter or filter.bags) and char.bags then fn(char.bags.items, "bags") end
 			if (not filter or filter.bank) and char.bank then fn(char.bank.items, "bank") end
 			if (not filter or filter.equipped) and char.equipped then fn(char.equipped.items, "equipped") end
+			if not filter or filter.mail then
+				if char.mail then fn(char.mail.items, "mail") end
+				if char.mailPending then
+					local now = time()
+					for _, batch in ipairs(char.mailPending) do
+						if FreshPending(batch, now) then fn(batch.items, "mail") end
+					end
+				end
+			end
 		end
 	end
 	-- The warband bank cannot hold listings, so the auction scope skips it.
@@ -401,6 +569,15 @@ local function ForEachSourceStore(fn, filter)
 				if (not filter or filter.altEquipped) and alt.equipped then
 					fn(alt.equipped.items, nil, altName)
 				end
+				-- Mail (snapshot + fresh in-transit credits) folds in unconditionally, like
+				-- bags/bank -- the own-mail tri-state gates the current character only.
+				if alt.mail then fn(alt.mail.items, nil, altName) end
+				if alt.mailPending then
+					local now = time()
+					for _, batch in ipairs(alt.mailPending) do
+						if FreshPending(batch, now) then fn(batch.items, nil, altName) end
+					end
+				end
 			end
 		end
 	end
@@ -427,6 +604,7 @@ local function MergeSources(dst, src)
 	if src.bank then dst.bank = (dst.bank or 0) + src.bank end
 	if src.equipped then dst.equipped = (dst.equipped or 0) + src.equipped end
 	if src.warband then dst.warband = (dst.warband or 0) + src.warband end
+	if src.mail then dst.mail = (dst.mail or 0) + src.mail end
 	if src.auctions then dst.auctions = (dst.auctions or 0) + src.auctions end
 	if src.alts then
 		local alts = dst.alts
@@ -450,7 +628,8 @@ ns.MergeSources = MergeSources
 -- over tiny stores -- caching would only buy invalidation bugs):
 --   {
 --     total, link,                                          -- link/track: first non-nil in visit order
---     sources = { bags = n, bank = n, warband = n, alts = { [name] = n } },   -- zero keys absent
+--     sources = { bags = n, bank = n, equipped = n, mail = n, warband = n,
+--                 alts = { [name] = n } },                                    -- zero keys absent
 --     groups  = { [ilvl] = { count, link, track, sources = <same shape> } },
 --   }
 -- An auctionsOnly filter yields the auction scope instead: `sources.auctions` (the own
@@ -565,6 +744,15 @@ end
 -- the AH opens, and OWNED_AUCTIONS_UPDATED rescans only while the flag is up -- a stray
 -- post-close event must not scan stale API state. The close handler just clears the
 -- flag, idempotent like BANKFRAME_CLOSED.
+-- Mail mirrors the auction shape with the interaction manager as the primary open/close
+-- signal (arg == MailInfo, exact match -- bank/merchant hides must not cross-talk;
+-- MAIL_SHOW/MAIL_CLOSED stay registered as belts). Opening asks the server for the inbox
+-- (throttle-gated -- Blizzard's own frame queues its own retry, so no timer here) and
+-- never scans directly: GetInboxNumItems can legitimately read (0, 0) before data
+-- arrives, and an immediate scan would swap in a false empty. MAIL_INBOX_UPDATE is the
+-- scan trigger (it also fires per mail consumed during Open All, so counts shrink live
+-- while looting). MAIL_SEND_INFO_UPDATE keeps the outgoing-slots snapshot current for
+-- the send-crediting hook below.
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -575,6 +763,15 @@ frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 frame:RegisterEvent("AUCTION_HOUSE_SHOW")
 frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
 frame:RegisterEvent("OWNED_AUCTIONS_UPDATED")
+frame:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW")
+frame:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_HIDE")
+frame:RegisterEvent("MAIL_SHOW")
+frame:RegisterEvent("MAIL_CLOSED")
+frame:RegisterEvent("MAIL_INBOX_UPDATE")
+frame:RegisterEvent("MAIL_SEND_INFO_UPDATE")
+frame:RegisterEvent("MAIL_SEND_SUCCESS")
+frame:RegisterEvent("MAIL_FAILED")
+frame:RegisterEvent("MAIL_UNLOCK_SEND_ITEMS")
 frame:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
 		if arg1 ~= addonName then return end
@@ -589,6 +786,27 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 			end
 		end
 		db = ExactItemCountDB
+		-- Prune expired send credits account-wide (no char key needed, so it can't wait
+		-- for PEW): a batch past the 31-day line describes mail the game guarantees has
+		-- moved -- collected, or auto-returned to the sender's inbox where the next scan
+		-- picks it up. This is the only healer a credit has when its recipient never
+		-- opens a mailbox with this addon (played on another PC, or abandoned).
+		do
+			local now = time()
+			for _, char in pairs(db.chars) do
+				local pending = char.mailPending
+				if type(pending) == "table" then
+					for i = #pending, 1, -1 do
+						if not FreshPending(pending[i], now) then
+							table.remove(pending, i)
+						end
+					end
+					if #pending == 0 then char.mailPending = nil end
+				else
+					char.mailPending = nil
+				end
+			end
+		end
 		-- Write-only diagnostic: which addon version last wrote this DB (for bug reports).
 		db.addonVersion = C_AddOns.GetAddOnMetadata(addonName, "Version")
 		-- Settings.lua's main chunk has already run (ADDON_LOADED fires after every file
@@ -620,5 +838,64 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		if ahOpen then ScanAuctions() end
 	elseif event == "AUCTION_HOUSE_CLOSED" then
 		ahOpen = false
+	elseif event == "MAIL_SHOW"
+		or (event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" and arg1 == INTERACTION_MAILBOX) then
+		-- Both signals may fire for one mailbox: query only on the closed->open edge.
+		if not mailOpen then
+			mailOpen = true
+			if CheckInbox and (not CanCheckInbox or CanCheckInbox()) then
+				CheckInbox()
+			end
+		end
+	elseif event == "MAIL_INBOX_UPDATE" then
+		if mailOpen then ScanMail() end
+	elseif event == "MAIL_SEND_INFO_UPDATE" then
+		if mailOpen then sendSnapshot = ScanSendSlots() end
+	elseif event == "MAIL_SEND_SUCCESS" then
+		-- Commit the stashed send into the recipient's pending credits. KnownCharKey only
+		-- returns keys already in db.chars, so the entry exists; the guard covers a
+		-- mid-session DeleteChar race. An empty stash (a plain letter, or nothing readable)
+		-- appends no batch -- credits degrade to "not recorded", never to a zero-item batch.
+		if pendingSend and pendingSend.items and next(pendingSend.items) and db then
+			local rc = db.chars[pendingSend.recipientKey]
+			if rc then
+				local pending = rc.mailPending
+				if not pending then
+					pending = {}
+					rc.mailPending = pending
+				end
+				pending[#pending + 1] = { sentAt = time(), items = pendingSend.items }
+			end
+		end
+		pendingSend, sendSnapshot = nil, nil
+	elseif event == "MAIL_FAILED" or event == "MAIL_UNLOCK_SEND_ITEMS" then
+		-- Failed send, or a cancelled confirmation dialog (the third outcome: neither
+		-- SUCCESS nor FAILED ever fires). The items are back in the slots, so the running
+		-- snapshot stays -- a re-send without another MAIL_SEND_INFO_UPDATE must still
+		-- find them; only the per-call stash is discarded.
+		pendingSend = nil
+	elseif event == "MAIL_CLOSED"
+		or (event == "PLAYER_INTERACTION_MANAGER_FRAME_HIDE" and arg1 == INTERACTION_MAILBOX) then
+		mailOpen = false -- idempotent, like BANKFRAME_CLOSED
+		pendingSend, sendSnapshot = nil, nil
 	end
 end)
+
+-- Send-crediting: SendMail(recipient, ...) is the one moment the recipient name is in
+-- hand, so a post-hook stashes { recipient's char key, the outgoing attachments }. The
+-- call is async -- the stash commits on MAIL_SEND_SUCCESS and is discarded on failure,
+-- cancel, or mailbox close (branches above). Whether the attachment slots are still
+-- readable inside the hook is unverified in-game, so the running sendSnapshot (rebuilt
+-- on MAIL_SEND_INFO_UPDATE) is the fallback; a readable re-read here is fresher and
+-- wins. A recipient that doesn't normalize to a scanned character key credits nothing:
+-- mail to anyone else is a gift leaving ownership, correctly counted nowhere. The
+-- type() guard keeps a future rename from erroring at load -- the send-crediting half
+-- then silently disables while the inbox half keeps working.
+if hooksecurefunc and type(SendMail) == "function" then
+	hooksecurefunc("SendMail", function(recipient)
+		local key = KnownCharKey(recipient)
+		pendingSend = key
+			and { recipientKey = key, items = ScanSendSlots() or sendSnapshot }
+			or nil
+	end)
+end

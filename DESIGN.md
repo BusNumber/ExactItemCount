@@ -25,9 +25,11 @@ Everything in this addon rests on how quality is encoded for different item fami
 Counts come from the current character's **bags** (backpack + 4 bags + reagent bag,
 live), the **character bank** and **warband (account) bank** (snapshots taken while the
 bank is open), the character's **equipped** items (worn gear plus profession/cooking/
-fishing tools & accessories, rescanned on every equipment change), and **alts** (every
-character the addon has scanned, bags + bank + equipped combined per alt). Everything
-persists in the `ExactItemCountDB` SavedVariable, so bank, equipped, and alt data survive
+fishing tools & accessories, rescanned on every equipment change), the character's
+**mailbox** (snapshot taken while the mailbox is open, plus in-transit credits for mail
+sent to your own characters — see [Mail](#mail)), and **alts** (every character the
+addon has scanned, bags + bank + equipped + mail combined per alt). Everything persists
+in the `ExactItemCountDB` SavedVariable, so bank, equipped, mail, and alt data survive
 relogs.
 
 The DB always stays complete; the settings layer filters **display only**. That makes
@@ -232,13 +234,64 @@ On auction: 3 (yours 1 · Liara 2)
 - The `Crafted items` block keeps meaning *owned* product only; a product-listings
   line on recipes is a possible future refinement, deliberately not implied here.
 
+### Mail
+
+Items in the mail are counted — and, unlike auction listings, they fold **into the
+grand total**: the test is the same *unconditional ownership* the total is built on,
+and mailbox contents pass it — nothing moves without your own action (collecting), and
+even the 30-day auto-return only shuffles the item between your own characters'
+mailboxes. So there is no separate sub-section; own mail is one `mail N` token in the
+location suffix, and an alt's mail folds into its combined per-alt number like its
+bags and bank.
+
+Two stores feed the one number:
+
+- **The inbox snapshot** (`char.mail`) — taken while the mailbox is open, wholesale per
+  scan, never incremental: mail can vanish with no "taken" event (a recipient can
+  delete a mail with attachments; returns and COD refusals move items silently), so
+  reconciliation beats bookkeeping. Rescans ride `MAIL_INBOX_UPDATE`, which also fires
+  per mail consumed during Open All — counts shrink live while looting.
+- **In-transit credits** (`char.mailPending`) — when you mail items to one of your own
+  scanned characters, a successful send appends a timestamped batch of the attachments
+  to the **recipient's** entry: the sender immediately sees the goods under the
+  recipient's name ("it's in Liara's hands now"), and the recipient's own sessions
+  show them as `mail` before collection. This is the one code path that writes into
+  *another* character's store — consistent with the DB being the single source of
+  truth; an entry never cares which session wrote it. Credits are **optimistic display
+  data**, never merged into the authoritative inbox snapshot: they are superseded
+  wholesale by that character's next full inbox scan (the inbox then reflects reality —
+  uncollected sends are in it, collected ones are in bags), and pruned after
+  **31 days**, since mail auto-returns at 30 the game guarantees the batch has moved by
+  then. The prune is the only healer a credit has when its recipient never opens a
+  mailbox with the addon running (played on another PC, or parked). Only recipients
+  that normalize to an existing character key are credited (bare name = own realm; a
+  typed realm normalizes the way `GetNormalizedRealmName` does; case-insensitive) —
+  mail to anyone else is a gift leaving your ownership, correctly counted nowhere.
+- **COD rule**: a Cash-on-Delivery package from a stranger is *not* yours until paid —
+  its attachments are skipped — unless the sender is one of your own scanned
+  characters (your own goods moving between alts stay owned throughout). Attached gold
+  is always ignored: gold is not an item.
+
+Accepted staleness, all bounded: mail collected on another PC leaves this PC's credit
+standing until that character next opens a mailbox here or the 31-day prune fires (the
+same SavedVariables limitation every snapshot has); a >100-message inbox blocks both
+the snapshot swap and the pending clear until Blizzard's own refetch loop converges
+(see gotchas); and a failed auction listing returned by mail can briefly show under
+both `On auction` (the stale listings snapshot) and `mail` — the two scopes never mix
+in one number, and the next AH visit heals it.
+
+The `mailMode` tri-state gates the **current character's** mail share only, like the
+equipped tri-state; there is deliberately **no** altMail checkbox — an alt's mail is
+ordinary countable inventory, unlike worn gear, so its only gates are the *Other
+characters* tri-state and the hidden-character flags.
+
 ### The location suffix
 
 The total line and each breakdown row carry a dimmed per-location split:
 `645 <star>: 3 (bags 2 · bank 1 · warband 3 · equipped 1 · Liara 1)`.
 
-- Fixed order `bags · bank · warband · equipped · alts`, with alts sorted **count
-  descending**. Zero-count locations are omitted.
+- Fixed order `bags · bank · warband · equipped · mail · alts`, with alts sorted
+  **count descending**. Zero-count locations are omitted.
 - Shown whenever the count is above zero, **including single-location** (`(bags 3)`) —
   a no-suffix line never needs interpreting.
 - The whole `bags <n>` token renders one step brighter than the rest of the suffix, so
@@ -250,10 +303,15 @@ The total line and each breakdown row carry a dimmed per-location split:
   that token specifically flags loose, grab-and-use inventory; worn gear is a distinct
   category. Alts' worn gear is not a separate token: it folds into the alt's combined
   name+count, gated by the `altEquipped` checkbox (see [Settings](#settings)).
-- Bare `bags`/`bank`/`equipped` always mean the character you're on. Alts are **name +
-  count only** (`Liara 140`), realm stripped — same-named alts across realms merge in
-  display; the DB key keeps the realm. (The `On auction` sub-section's suffix has its
-  own two-token vocabulary — `yours` + alt names — see [On auction](#on-auction).)
+- The `mail <n>` token (the character's **own** mailbox plus its uncollected in-transit
+  sends, summed — see [Mail](#mail)) likewise sits at the suffix base: nothing in a
+  mailbox is "in hand". Alts' mail is not a separate token either; it folds into their
+  name+count unconditionally.
+- Bare `bags`/`bank`/`equipped`/`mail` always mean the character you're on. Alts are
+  **name + count only** (`Liara 140`), realm stripped — same-named alts across realms
+  merge in display; the DB key keeps the realm. (The `On auction` sub-section's suffix
+  has its own two-token vocabulary — `yours` + alt names — see
+  [On auction](#on-auction).)
 - **Source-major lines** (`Bags: N` per location, the way inventory addons usually
   render it) are rejected: they re-ambiguate the per-variant counts this addon exists
   to split.
@@ -294,20 +352,25 @@ scans never change with settings.
 
 - **Locations**: the current character's bags are **always counted** — no setting; it's
   the one source whose absence would make every tooltip lie about what's in hand. Bank /
-  Warband bank / Equipped items / Other characters are each one tri-state: *Always show* /
-  *Only while \[modifier\] held* / *Never*. A gated-off source is excluded from **all**
-  displayed numbers (grand total, rows, suffix), so the total-equals-sum invariant
-  survives any combination — the filter is applied at the data-layer iteration root, not
-  in the renderer. *Equipped items* gates only the **current** character's worn gear; a
-  separate **Include in count for alts** checkbox (`altEquipped`, on by default), nested
-  as an indented sub-item under the *Equipped items* dropdown (via `SetParentInitializer`
-  for the margin; always enabled — it governs alts, not this character's own equipped
-  setting), gates whether alts' worn gear folds into their per-alt total. (A boolean, not
-  a tri-state: alts have no per-source suffix tokens to modifier-gate, so the only
-  meaningful choice is in/out.) *On auction* (`auctionsMode`, default always) is the
-  fifth entry — a tri-state like the rest, but it gates the separate `On auction`
-  sub-section rather than a share of the total (listings are never part of the owned
-  numbers; see [On auction](#on-auction)); its **Include alts' auctions** sub-checkbox
+  Warband bank / Equipped items / Mail / Other characters are each one tri-state:
+  *Always show* / *Only while \[modifier\] held* / *Never*. A gated-off source is
+  excluded from **all** displayed numbers (grand total, rows, suffix), so the
+  total-equals-sum invariant survives any combination — the filter is applied at the
+  data-layer iteration root, not in the renderer. *Equipped items* gates only the
+  **current** character's worn gear; a separate **Include in count for alts** checkbox
+  (`altEquipped`, on by default), nested as an indented sub-item under the *Equipped
+  items* dropdown (via `SetParentInitializer` for the margin; always enabled — it
+  governs alts, not this character's own equipped setting), gates whether alts' worn
+  gear folds into their per-alt total. (A boolean, not a tri-state: alts have no
+  per-source suffix tokens to modifier-gate, so the only meaningful choice is in/out.)
+  *Mail* (`mailMode`, default always) likewise gates only the **current** character's
+  mailbox share — inbox snapshot plus its uncollected outgoing credits, see
+  [Mail](#mail) — with deliberately no alt checkbox: an alt's mail is ordinary
+  countable inventory and folds into its per-alt number unconditionally. *On auction*
+  (`auctionsMode`, default always) is the sixth entry — a tri-state like the rest, but
+  it gates the separate `On auction` sub-section rather than a share of the total
+  (listings are never part of the owned numbers; see
+  [On auction](#on-auction)); its **Include alts' auctions** sub-checkbox
   (`altAuctions`, default **off**) nests under it the same way — with the predicate
   actually used this time: unlike `altEquipped`, this one is a strict sub-gate of its
   parent (with the sub-section on *Never* it can change nothing), so it reads disabled
@@ -359,7 +422,7 @@ Settings layer: defaults/sanitizing for `db.settings`, the Options panel (vertic
 
 ### tests/
 
-Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank and auction never-wipe, auction-scope isolation (listings leak into no owned number), sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
+Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank / auction / truncated-inbox never-wipe, auction-scope isolation (listings leak into no owned number, mail never leaks into the auction scope), the send-credit lifecycle (known-recipient normalization, commit/discard paths, supersede-on-scan, 31-day expiry), sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
 ```
 
 Files share the private addon table via the `local addonName, ns = ...` vararg. **Keep
@@ -386,13 +449,17 @@ ExactItemCountDB = {
       bank     = { scannedAt = <epoch>, items = <items> },
       equipped = { scannedAt = <epoch>, items = <items> },     -- currently-worn gear/tools
       auctions = { scannedAt = <epoch>, items = <items> },     -- active AH listings (sold excluded)
+      mail     = { scannedAt = <epoch>, items = <items> },     -- inbox snapshot (taken at the mailbox)
+      mailPending = { { sentAt = <epoch>, items = <items> }, ... },
+                                                               -- optimistic in-transit credits,
+                                                               -- written by the SENDER's session (see Mail)
     },
   },
   settings = {                                                 -- account-wide display settings
     hideZero = false, altsExpandKey = false,                   -- booleans (bags: no setting)
     altEquipped = true,                                        -- count alts' worn gear too
     altAuctions = false,                                       -- alts' listings in "On auction"
-    bankMode/warbandMode/equippedMode/altsMode = "always"|"modifier"|"never",
+    bankMode/warbandMode/equippedMode/mailMode/altsMode = "always"|"modifier"|"never",
     auctionsMode = "always"|"modifier"|"never",                -- the "On auction" sub-section
     modifier = "SHIFT"|"ALT"|"CTRL",
     suffixMode/rowsMode = "always"|"modifier",
@@ -447,12 +514,13 @@ buy invalidation bugs.
 - `ns.Get(itemID, filter)` → `nil` (owned nowhere, or nowhere visible) or
   `{ total, link, sources, groups = { [ilvl] = { count, link, track, sources } } }`
   where every `sources` is
-  `{ bags = n, bank = n, equipped = n, warband = n, alts = { [name] = n } }` with
-  zero-count keys **absent** (so "non-zero only" in the suffix holds by construction).
-  The `equipped` key is the **current** character's worn gear only; an alt's worn gear
-  is summed into its `alts[name]` entry alongside its bags/bank. Link/track
-  representatives: first non-nil in visit order — own bags > own bank > own equipped >
-  warband > alts. An `auctionsOnly` filter yields the **auction scope** instead:
+  `{ bags = n, bank = n, equipped = n, mail = n, warband = n, alts = { [name] = n } }`
+  with zero-count keys **absent** (so "non-zero only" in the suffix holds by
+  construction). The `equipped` and `mail` keys are the **current** character's only
+  (mail = inbox snapshot + fresh pending credits, summed under the one key); an alt's
+  worn gear and mail are summed into its `alts[name]` entry alongside its bags/bank.
+  Link/track representatives: first non-nil in visit order — own bags > own bank >
+  own equipped > own mail > warband > alts. An `auctionsOnly` filter yields the **auction scope** instead:
   `sources.auctions` (the current character's listings) plus `alts` — the two scopes'
   keys never mix in one view.
 - `ns.GetByName(itemID, filter, accept)` → `(name, members, combined)`: `members` is an
@@ -467,11 +535,11 @@ buy invalidation bugs.
   `combined` is built with); the renderer reuses it when same-name+same-tier members
   collapse into one row.
 - `filter` (optional, nil = everything):
-  `{ bags/bank/equipped/warband/alts = bool, altEquipped = bool,
+  `{ bags/bank/equipped/mail/warband/alts = bool, altEquipped = bool,
   hiddenChars = { [fullKey] = true } }`, applied inside `ForEachSourceStore` — the one
   place the full `Name-Realm` key is in hand. `equipped` gates the current character's
-  worn gear; `altEquipped` gates whether each alt's worn gear folds into its per-alt
-  number. (Callbacks only see realm-stripped display names.) `GetByName` threads it through
+  worn gear and `mail` its mailbox; `altEquipped` gates whether each alt's worn gear
+  folds into its per-alt number (alts' mail has no flag — it always folds in). (Callbacks only see realm-stripped display names.) `GetByName` threads it through
   **both** its passes so a sibling owned only in a filtered-out source contributes
   neither a row nor a total share. The tooltip layer builds the filter per render
   (`BuildFilter` in `Tooltip.lua`), folding live modifier state into the tri-state
@@ -612,6 +680,48 @@ a given line of code looks the way it does.
   checklist verifies them in-game, along with whether the SHOW-time query can be
   throttled away (`AUCTION_HOUSE_THROTTLED_SYSTEM_READY` retry is a possible follow-up;
   the snapshot is then stale but never wrong).
+- **Mailbox open/close comes from the interaction manager.** Blizzard's own MailFrame
+  registers neither `MAIL_SHOW` nor `MAIL_CLOSED` (the latter stopped firing in 10.0) —
+  the frame is shown/hidden via `PLAYER_INTERACTION_MANAGER_FRAME_SHOW/HIDE` with
+  `Enum.PlayerInteractionType.MailInfo` (17, confirmed in Blizzard's generated
+  constants). The addon keys on the PIM events with an **exact** arg match (bank/
+  merchant/gossip hides must not cross-talk) and keeps both legacy events registered as
+  defensive belts; open is edge-triggered, close idempotent — the `BANKFRAME_CLOSED`
+  discipline.
+- **The inbox is paged and capped at 100.** `GetInboxNumItems()` returns `(numItems,
+  totalItems)` — *downloaded/indexable* vs *server-side total*. (The wiki describes
+  `totalItems` as "capacity"; Blizzard's own `InboxFrame_Update` proves otherwise,
+  treating `totalItems - numItems` as overflow against `MAX_INBOX_SIZE = 100`.)
+  Indexing only ever reaches `1..numItems`, so a scan while `totalItems > numItems`
+  would silently undercount — the `ReadableInboxCount` guard keeps the stored snapshot
+  instead (nil = never-wipe, the `ReadableBankTabs` convention), and needs no refetch
+  loop of its own: Blizzard's InboxFrame re-issues `CheckInbox()` until the two
+  converge, firing `MAIL_INBOX_UPDATE` each round. A complete **empty** inbox is a
+  real result and swaps in an empty snapshot. The open handler itself never scans:
+  right after opening, `GetInboxNumItems` can legitimately read `(0, 0)` before data
+  arrives, and an immediate scan would swap in a false empty (the AH SHOW→UPDATED
+  pattern). `CheckInbox()` is server-throttled — gate it on `C_Mail.CanCheckInbox()`;
+  no retry timer, Blizzard's `MailFrame_RefreshInbox` queues its own and the scan
+  rides the eventual update.
+- **`GetInboxItem`'s quality return is a long-documented bug (always -1)** — never read
+  it; quality resolves from the link like everywhere else. `ATTACHMENTS_MAX_RECEIVE`
+  (16) / `ATTACHMENTS_MAX_SEND` (12) are **Lua globals defined in Blizzard_MailFrame**,
+  not C constants — the numeric fallbacks are load-order insurance. There is no count
+  API for send attachments: loop every slot and skip nils, the way Blizzard's own send
+  code iterates. `C_TooltipInfo.GetInboxItem`/`GetSendMailItem` supply upgrade-track
+  lines for mail the same gear-gated way bag tooltips do.
+- **Send-slot readability inside a `SendMail` post-hook is unverified in-game**, so
+  send-crediting is event-driven: `MAIL_SEND_INFO_UPDATE` (fires on attach/detach)
+  keeps a running slot snapshot, the `hooksecurefunc("SendMail")` post-hook captures
+  the recipient — the one moment that name is in hand — preferring a fresh slot
+  re-read when readable, and the commit waits for `MAIL_SEND_SUCCESS` (`SendMail` is
+  async). Three outcomes need handling: SUCCESS commits, `MAIL_FAILED` discards, and
+  `MAIL_UNLOCK_SEND_ITEMS` — a cancelled confirmation dialog, after which neither of
+  the other two ever fires — discards the stash while keeping the slot snapshot (the
+  items are back in the slots for a re-send). If both the re-read and the snapshot
+  come up empty, no batch is appended: crediting degrades to "not recorded", never to
+  wrong counts. `SendMail` itself is `noscript`-restricted (blocked from macros, free
+  for addon code) and absent from the 11.0 `hooksecurefunc` blacklist.
 - **Bag iteration**: bags are `Enum.BagIndex.Backpack` (0) …
   `Enum.BagIndex.ReagentBag` (5), contiguous. Bank tabs post-11.2 rework: character
   `Enum.BagIndex.CharacterBankTab_1..6` (6–11), warband `AccountBankTab_1..5` (12–16) —

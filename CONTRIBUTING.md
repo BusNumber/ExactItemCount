@@ -67,8 +67,13 @@ are the DESIGN.md invariants:
 - auction listings never leak into any owned number — the auction scope is isolated,
   its sub-section renders only when non-zero, sold listings are excluded, and alts'
   listings join only behind the opt-in checkbox;
-- a bank (or owned-auctions result) that can't currently be read never wipes its
-  stored snapshot;
+- mail joins the owned numbers (the inbox snapshot and in-transit send credits sum
+  under one `mail` token) and never the auction scope; send credits land only under a
+  recipient that normalizes to a known character key, commit on success, discard on
+  failure/cancel/close, are superseded by that character's next full inbox scan, and
+  expire after 31 days; a stranger's COD attachments are excluded;
+- a bank (or owned-auctions result, or a truncated >100-message inbox) that can't
+  currently be read in full never wipes its stored snapshot;
 - the settings sanitizer round-trips: persisted `false` survives, junk values reset,
   and a DB-version rebuild carries `settings` over.
 
@@ -172,6 +177,47 @@ The reason this addon exists:
 - [ ] Hover a commodity you have listed (no per-listing item link expected): its own
       tier still counts; hovering its **other** quality tier may omit the listed tier
       from the block until the cache warms — accepted, but confirm it self-heals.
+
+### Mail
+
+- [ ] One-time API checks at a mailbox: `/dump GetInboxNumItems()` — confirm the first
+      return is the downloaded/indexable count and the second the server total (with a
+      >100-mail box, confirm `totalItems > numItems` and that the client keeps
+      refetching until they converge). `/dump GetInboxItem(1, 1)` — itemID and count
+      correct, quality `-1` as documented (the addon must never read it). `/dump
+      ATTACHMENTS_MAX_RECEIVE, ATTACHMENTS_MAX_SEND` — 16 and 12.
+- [ ] Event flow: opening a mailbox fires `PLAYER_INTERACTION_MANAGER_FRAME_SHOW` with
+      `Enum.PlayerInteractionType.MailInfo` (17) and closing fires the matching HIDE
+      (note whether `MAIL_SHOW` also fires — either way the flag must not double-query);
+      `MAIL_INBOX_UPDATE` fires once data arrives, per mail consumed during **Open
+      All** (counts shrink live), and note whether it fires at all for an *empty*
+      inbox (an empty snapshot may then wait for the next mail change — accepted).
+- [ ] Throttle: `C_Mail.CanCheckInbox()` exists; a quick close/reopen still ends with
+      a correct scan (Blizzard's own queued retry drives the update).
+- [ ] Hover an item with a copy sitting in your inbox: the grand total includes it and
+      a `mail N` token appears between `equipped` and the alts. Collect the mail —
+      the token drops as the bags count rises, while the mailbox is still open.
+- [ ] Send items to one of your **own characters**: the moment the send succeeds, the
+      hovered count shows them under the recipient's name. `hooksecurefunc("SendMail")`
+      fired with the recipient; note whether `GetSendMailItem` was still readable
+      inside the hook (the addon works either way — the `MAIL_SEND_INFO_UPDATE`
+      snapshot is the fallback; confirm that event fires on attach/detach).
+- [ ] Log the recipient, open their mailbox: the in-transit credit is replaced by the
+      real inbox count — **no double count** at any point (before collecting, the item
+      shows as the recipient's `mail`; after, as bags).
+- [ ] Cancel a send confirmation dialog if one appears (e.g. a refundable item):
+      `MAIL_UNLOCK_SEND_ITEMS` fires, nothing is credited, and re-sending afterwards
+      credits correctly.
+- [ ] Send to a name that is **not** one of your characters: nothing is credited
+      anywhere. Send to an own character on a **connected realm** (`Name-Realm` form):
+      the credit lands under that character.
+- [ ] COD from a stranger: the package's items are **not** counted while unpaid; pay
+      (or return) and revisit the mailbox — counts settle correctly. COD between your
+      own characters counts throughout.
+- [ ] Mail tri-state: *Never* drops your own mail from total and suffix while alts'
+      mail stays inside their per-character numbers; *Only while held* updates an open
+      tooltip in place, never duplicating the section.
+- [ ] Characters page: each row's age line now includes `mail`.
 
 ### Persistence lifecycle
 

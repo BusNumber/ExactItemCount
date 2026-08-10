@@ -9,6 +9,7 @@ test("defaults_fill_missing_keys", function()
 		bankMode = "always",
 		warbandMode = "always",
 		equippedMode = "always",
+		mailMode = "always",
 		altsMode = "always",
 		altEquipped = true,
 		auctionsMode = "always",
@@ -53,6 +54,15 @@ test("auction_settings_roundtrip", function()
 	} }) })
 	assertEq(ns2.GetSettings().auctionsMode, "always")
 	assertEq(ns2.GetSettings().altAuctions, false)
+end)
+
+test("mail_settings_roundtrip", function()
+	-- A non-default choice survives a reload...
+	local ns = loadAddon({ noPEW = true, db = H.db({ settings = { mailMode = "never" } }) })
+	assertEq(ns.GetSettings().mailMode, "never")
+	-- ...and junk degrades to the default.
+	local ns2 = loadAddon({ noPEW = true, db = H.db({ settings = { mailMode = "sometimes" } }) })
+	assertEq(ns2.GetSettings().mailMode, "always")
 end)
 
 test("existing_modifier_choice_kept", function()
@@ -128,7 +138,7 @@ test("settings_table_identity_binding", function()
 			assertEq(reg.varType, type(reg.default), variable .. " varType matches its default")
 		end
 	end
-	assertEq(count, 15) -- every non-proxy setting registered exactly once
+	assertEq(count, 16) -- every non-proxy setting registered exactly once
 	assertTrue(S.settingsRegistry["ExactItemCount_altsExpandKey"].proxy,
 		"the list-all checkbox registers as a proxy setting")
 end)

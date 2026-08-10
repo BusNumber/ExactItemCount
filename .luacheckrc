@@ -27,6 +27,7 @@ read_globals = {
 	"C_Bank",
 	"C_Container",
 	"C_Item",
+	"C_Mail",
 	"C_TooltipInfo",
 	"C_TradeSkillUI",
 
@@ -37,6 +38,7 @@ read_globals = {
 	"Enum",
 	"GameTooltip",
 	"GameTooltip_Hide",
+	"hooksecurefunc",
 	"ItemLocation",
 	"ItemRefTooltip",
 	"ShoppingTooltip1",
@@ -60,7 +62,19 @@ read_globals = {
 	"GetInventoryItemID",
 	"GetInventoryItemLink",
 
+	-- mail (legacy globals, still current -- the mail API was never C_-namespaced)
+	"CheckInbox",
+	"GetInboxNumItems",
+	"GetInboxHeaderInfo",
+	"GetInboxItem",
+	"GetInboxItemLink",
+	"GetSendMailItem",
+	"GetSendMailItemLink",
+	"SendMail",
+
 	-- Blizzard global strings and misc
+	"ATTACHMENTS_MAX_RECEIVE", -- Lua globals from Blizzard_MailFrame, not C constants
+	"ATTACHMENTS_MAX_SEND",
 	"CANCEL",
 	"DELETE",
 	"INVSLOT_FIRST_EQUIPPED",

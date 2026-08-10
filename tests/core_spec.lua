@@ -329,6 +329,292 @@ test("auction_never_wipes_nil_or_partial_but_empty_swaps", function()
 	assertEq(next(char.auctions.items), nil)
 end)
 
+-- ---------------------------------------------------------------- mail scans
+
+test("mail_scan_on_inbox_update", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(102, { name = "Dropped Helm", equipLoc = "INVTYPE_HEAD" })
+		S.defineItem(201, { name = "Rousing Fiber", reagent = 1 })
+		S.setInbox({
+			{ sender = "Someone", attachments = {
+				{ id = 102, count = 1, ilvl = 613, track = { name = "Hero", step = 2, max = 6 } },
+				{ id = 201, count = 20 },
+			} },
+			{ sender = "Goldie", money = 500 }, -- money-only mail: gold is not an item
+		})
+	end })
+	S.fire("MAIL_SHOW")
+	assertEq(S.calls.checkInbox, 1) -- the inbox query fires on the open edge...
+	assertEq(_G.ExactItemCountDB.chars[H.OWN].mail, nil) -- ...but no scan until data arrives
+	S.fire("MAIL_INBOX_UPDATE")
+	local snap = _G.ExactItemCountDB.chars[H.OWN].mail
+	assertEq(snap.scannedAt, 1000)
+	assertEq(snap.items[102].total, 1)
+	assertEq(snap.items[102].groups[613].count, 1)
+	assertEq(snap.items[102].groups[613].track, { name = "Hero", step = 2, max = 6 })
+	assertEq(snap.items[201].total, 20)
+	assertEq(snap.items[201].groups[0].count, 20) -- no ilvl in mail: link-then-0 fallback
+	assertEq(S.calls.inboxTip, 1) -- track fetched once per NEW GEAR group only
+end)
+
+test("mail_checkinbox_gated_by_throttle", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		S.canCheckInbox = false
+		S.setInbox({ { sender = "X", attachments = { { id = 301, count = 3 } } } })
+	end })
+	S.fire("MAIL_SHOW")
+	assertEq(S.calls.checkInbox, 0) -- throttled: the query is skipped, no timer of our own
+	S.fire("MAIL_INBOX_UPDATE") -- Blizzard's queued retry still lands data eventually
+	assertEq(_G.ExactItemCountDB.chars[H.OWN].mail.items[301].total, 3)
+end)
+
+test("mail_scan_only_while_open_and_close_idempotent", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		S.setInbox({ { sender = "X", attachments = { { id = 301, count = 3 } } } })
+	end })
+	S.fire("MAIL_INBOX_UPDATE") -- mailbox not open: a stray event must not scan
+	assertEq(_G.ExactItemCountDB.chars[H.OWN].mail, nil)
+	S.fire("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", 17) -- the PRIMARY open signal
+	S.fire("MAIL_SHOW") -- the belt fires too: the open stays edge-triggered
+	assertEq(S.calls.checkInbox, 1)
+	S.fire("MAIL_INBOX_UPDATE")
+	local char = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(char.mail.items[301].total, 3)
+	S.fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", 5) -- a NON-mail interaction hide: ignored
+	S.setInbox({ { sender = "X", attachments = { { id = 301, count = 9 } } } })
+	S.fire("MAIL_INBOX_UPDATE") -- still open: rescans (collection shrinks counts live)
+	assertEq(char.mail.items[301].total, 9)
+	S.fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", 17)
+	S.fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", 17) -- a double close stays idempotent
+	S.setInbox({ { sender = "X", attachments = { { id = 301, count = 1 } } } })
+	S.fire("MAIL_INBOX_UPDATE")
+	assertEq(char.mail.items[301].total, 9) -- closed: the snapshot keeps its last scan
+	S.fire("MAIL_SHOW") -- reopen, then the MAIL_CLOSED belt closes too
+	S.fire("MAIL_CLOSED")
+	S.fire("MAIL_INBOX_UPDATE")
+	assertEq(char.mail.items[301].total, 9)
+end)
+
+test("mail_never_wipes_truncated_inbox_but_empty_swaps", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		S.setInbox({ { sender = "X", attachments = { { id = 301, count = 3 } } } })
+	end })
+	S.fire("MAIL_SHOW")
+	S.fire("MAIL_INBOX_UPDATE")
+	local char = _G.ExactItemCountDB.chars[H.OWN]
+	-- Seed a pending credit: the truncation guard must protect it too (the clear rides
+	-- the snapshot swap, and only a full read supersedes the optimistic data).
+	char.mailPending = { H.pending(900, { { id = 301, count = 1 } }) }
+	assertEq(char.mail.scannedAt, 1000)
+	S.advance(100) -- a successful rescan from here on would restamp scannedAt to 1100
+
+	S.inboxTotal = 105 -- server total beyond the downloaded page: this scan can't see it all
+	S.fire("MAIL_INBOX_UPDATE")
+	assertEq(char.mail.scannedAt, 1000)
+	assertEq(char.mail.items[301].total, 3)
+	assertTrue(char.mailPending ~= nil, "pending credits survive a truncated scan")
+
+	S.inboxTotal = nil
+	S.setInbox({}) -- a complete EMPTY inbox is a real result: everything collected
+	S.fire("MAIL_INBOX_UPDATE")
+	assertEq(char.mail.scannedAt, 1100)
+	assertEq(next(char.mail.items), nil)
+	assertEq(char.mailPending, nil) -- and the successful swap clears the credits
+end)
+
+test("mail_nil_numitems_keeps_snapshot", function()
+	-- API surprise: GetInboxNumItems returning nothing must keep the snapshot, never wipe.
+	local _, S = loadAddon({
+		setup = function(S)
+			S.defineItem(301, { name = "Acorn" })
+			_G.GetInboxNumItems = function() return nil end -- frozen into Core's local at load
+		end,
+		db = function(S)
+			return H.db({ chars = { [H.OWN] = H.charStore({
+				mail = H.dbItems({ { id = 301, count = 3 } }),
+			}) } })
+		end, noPEW = true })
+	S.fire("MAIL_SHOW")
+	S.fire("MAIL_INBOX_UPDATE")
+	local char = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(char.mail.scannedAt, 900) -- the fixture snapshot, untouched
+	assertEq(char.mail.items[301].total, 3)
+end)
+
+test("mail_cod_excluded_unless_known_sender", function()
+	local _, S = loadAddon({
+		setup = function(S)
+			S.defineItem(301, { name = "Acorn" })
+			S.setInbox({
+				{ sender = "Stranger", cod = 500, attachments = { { id = 301, count = 10 } } },
+				{ sender = "liara", cod = 500, attachments = { { id = 301, count = 3 } } },
+				{ sender = "bram-Azjol-Nerub", cod = 500, attachments = { { id = 301, count = 2 } } },
+				{ sender = "Stranger", attachments = { { id = 301, count = 1 } } },
+			})
+		end,
+		db = function()
+			return H.db({ chars = {
+				[H.OWN] = H.charStore({}),
+				["Liara-TestRealm"] = H.charStore({}),
+				["Bram-AzjolNerub"] = H.charStore({}),
+			} })
+		end })
+	S.fire("MAIL_SHOW")
+	S.fire("MAIL_INBOX_UPDATE")
+	-- A stranger's COD package isn't owned until paid -> skipped. A known character's
+	-- COD is own goods moving between alts -> counted, whether typed bare (own realm)
+	-- or in the cross-realm Name-Realm form (case- and separator-insensitive). Plain
+	-- non-COD mail from anyone is a gift in hand -> counted.
+	assertEq(_G.ExactItemCountDB.chars[H.OWN].mail.items[301].total, 6)
+end)
+
+-- ---------------------------------------------------------------- send crediting
+
+test("send_credit_commit_on_success", function()
+	local _, S = loadAddon({ db = function(S)
+		S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
+		return H.db({ chars = { ["Liara-TestRealm"] = H.charStore({}) } })
+	end })
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 101, count = 1, ilvl = 658,
+		track = { name = "Hero", step = 4, max = 6 } })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	S.advance(50)
+	_G.SendMail("Liara", "goods", "")
+	S.fire("MAIL_SEND_SUCCESS")
+	local pending = _G.ExactItemCountDB.chars["Liara-TestRealm"].mailPending
+	assertEq(#pending, 1)
+	assertEq(pending[1].sentAt, 1050)
+	assertEq(pending[1].items[101].total, 1)
+	assertEq(pending[1].items[101].groups[658].count, 1)
+	assertEq(pending[1].items[101].groups[658].track.name, "Hero")
+	assertTrue(pending[1].items[101].groups[658].link ~= nil, "representative link stored")
+	-- One gear-gated fetch per fresh slot read: the event snapshot and the hook re-read.
+	assertEq(S.calls.sendTip, 2)
+end)
+
+test("send_credit_hook_reread_vs_event_snapshot", function()
+	-- (a) Slots already cleared when the post-hook runs (the unverified-in-game case):
+	-- the event-built snapshot is credited instead.
+	local _, S = loadAddon({ db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = { ["Liara-TestRealm"] = H.charStore({}) } })
+	end })
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 301, count = 5 })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	S.sendSlotsClearOnSend = true
+	_G.SendMail("Liara")
+	S.fire("MAIL_SEND_SUCCESS")
+	assertEq(_G.ExactItemCountDB.chars["Liara-TestRealm"].mailPending[1].items[301].total, 5)
+
+	-- (b) Slots readable inside the hook and FRESHER than the event snapshot: the
+	-- re-read wins.
+	local _, S2 = loadAddon({ db = function(S3)
+		S3.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = { ["Liara-TestRealm"] = H.charStore({}) } })
+	end })
+	S2.fire("MAIL_SHOW")
+	S2.setSendSlot(1, { id = 301, count = 5 })
+	S2.fire("MAIL_SEND_INFO_UPDATE")
+	S2.setSendSlot(1, { id = 301, count = 9 }) -- changed without another event
+	_G.SendMail("Liara")
+	S2.fire("MAIL_SEND_SUCCESS")
+	assertEq(_G.ExactItemCountDB.chars["Liara-TestRealm"].mailPending[1].items[301].total, 9)
+end)
+
+test("send_credit_discard_paths", function()
+	local _, S = loadAddon({ db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = { ["Liara-TestRealm"] = H.charStore({}) } })
+	end })
+	local liara = _G.ExactItemCountDB.chars["Liara-TestRealm"]
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 301, count = 5 })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	-- Failed send: the stash drops; a stray late SUCCESS finds nothing and no-ops (its
+	-- snapshot clear is correct -- a real SUCCESS means the slots emptied).
+	_G.SendMail("Liara")
+	S.fire("MAIL_FAILED")
+	S.fire("MAIL_SEND_SUCCESS")
+	assertEq(liara.mailPending, nil)
+	-- Cancelled confirmation (MAIL_UNLOCK_SEND_ITEMS -- neither SUCCESS nor FAILED ever
+	-- fires): the stash drops but the slot snapshot survives, so a re-send with the
+	-- slots unreadable still credits from it. (Re-attaching fires the INFO_UPDATE.)
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	_G.SendMail("Liara")
+	S.fire("MAIL_UNLOCK_SEND_ITEMS")
+	S.sendSlots = {} -- hook re-read now finds nothing; only the kept snapshot can credit
+	_G.SendMail("Liara")
+	S.fire("MAIL_SEND_SUCCESS")
+	assertEq(liara.mailPending[1].items[301].total, 5)
+	-- Mailbox closed mid-flight: everything discards.
+	liara.mailPending = nil
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 301, count = 5 })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	_G.SendMail("Liara")
+	S.fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", 17)
+	S.fire("MAIL_SEND_SUCCESS")
+	assertEq(liara.mailPending, nil)
+end)
+
+test("send_credit_unknown_recipient_uncredited", function()
+	local _, S = loadAddon({ db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = { ["Liara-TestRealm"] = H.charStore({}) } })
+	end })
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 301, count = 5 })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	_G.SendMail("Randomguy") -- not a scanned character: a gift, counted nowhere
+	S.fire("MAIL_SEND_SUCCESS")
+	_G.SendMail("Liara-OtherRealm") -- same name, different realm: still a stranger
+	S.fire("MAIL_SEND_SUCCESS")
+	for key, char in pairs(_G.ExactItemCountDB.chars) do
+		assertTrue(char.mailPending == nil, "no pending credited under " .. key)
+	end
+	-- A plain letter (no attachments anywhere) to a known alt appends no batch either.
+	S.sendSlots = {}
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	_G.SendMail("Liara")
+	S.fire("MAIL_SEND_SUCCESS")
+	assertEq(_G.ExactItemCountDB.chars["Liara-TestRealm"].mailPending, nil)
+end)
+
+test("mail_pending_pruned_at_load_and_skipped_at_read", function()
+	local DAY = 24 * 60 * 60
+	local ns, S = loadAddon({ noPEW = true,
+		setup = function(S) S.setTime(40 * DAY) end,
+		db = function(S)
+			S.defineItem(301, { name = "Acorn" })
+			return H.db({ chars = {
+				[H.OWN] = H.charStore({ bags = H.dbItems({ { id = 301, count = 1 } }) }),
+				["Liara-TestRealm"] = H.charStore({ mailPending = {
+					{ sentAt = 39 * DAY, items = H.dbItems({ { id = 301, count = 5 } }) }, -- 1d old
+					{ sentAt = 5 * DAY, items = H.dbItems({ { id = 301, count = 9 } }) },  -- 35d old
+					"junk", -- hand-edited garbage must prune, not error
+				} }),
+				["Bram-TestRealm"] = H.charStore({ mailPending = {
+					{ sentAt = 1 * DAY, items = H.dbItems({ { id = 301, count = 2 } }) },
+				} }),
+			} })
+		end })
+	local liara = _G.ExactItemCountDB.chars["Liara-TestRealm"]
+	assertEq(#liara.mailPending, 1) -- the expired batch and the junk pruned at load
+	assertEq(liara.mailPending[1].sentAt, 39 * DAY)
+	assertEq(_G.ExactItemCountDB.chars["Bram-TestRealm"].mailPending, nil) -- emptied -> nil
+	assertEq(ns.Get(301).total, 6) -- own bags 1 + Liara's fresh credit 5
+	-- A batch fresh at load can cross the 31-day line mid-session: it drops out of the
+	-- read without a reload.
+	S.advance(31 * DAY)
+	assertEq(ns.Get(301).total, 1)
+	assertEq(ns.Get(301).sources.alts, nil)
+end)
+
 -- ---------------------------------------------------------------- DB lifecycle
 
 test("fresh_db_stamped_and_foreign_addon_ignored", function()
@@ -375,12 +661,14 @@ end)
 -- ---------------------------------------------------------------- aggregation seams
 
 -- The standard multi-source world for item 101 (crafted chest, R4@645 / R5@658):
--- own bags 2@645, own bank 1@645 + 1@658, own equipped 1@658, warband 4@645,
--- alt Liara bags 3@645 + equipped 1@658, alt Bram bank 2@658. Full total 15.
--- Item 401 exists only in the own bank (for the filtered-to-nothing case).
--- Auction stores (own 1@658, Liara 2@645) are ALSO seeded -- the normal path must never
--- visit them, so the unchanged totals asserted by the tests below double as the no-leak
--- lock; only the auctionsOnly scope sees them.
+-- own bags 2@645, own bank 1@645 + 1@658, own equipped 1@658, own mail 1@645 plus a
+-- fresh in-transit credit 1@658 (snapshot AND pending under one "mail" tag), warband
+-- 4@645, alt Liara bags 3@645 + equipped 1@658 + mail 2@645, alt Bram bank 2@658.
+-- Full total 19. Item 401 exists only in the own bank (for the filtered-to-nothing
+-- case). Auction stores (own 1@658, Liara 2@645) are ALSO seeded -- the normal path
+-- must never visit them, so the unchanged totals asserted by the tests below double as
+-- the no-leak lock; only the auctionsOnly scope sees them (and it, in turn, never sees
+-- mail).
 local function worldDB(S)
 	S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
 	local l645 = S.link(101, "r4", { ilvl = 645, crafted = 4 })
@@ -397,11 +685,14 @@ local function worldDB(S)
 				}),
 				equipped = H.dbItems({ { id = 101, count = 1, ilvl = 658, link = l658 } }),
 				auctions = H.dbItems({ { id = 101, count = 1, ilvl = 658, link = l658 } }),
+				mail = H.dbItems({ { id = 101, count = 1, ilvl = 645, link = l645 } }),
+				mailPending = { H.pending(900, { { id = 101, count = 1, ilvl = 658, link = l658 } }) },
 			}),
 			["Liara-RealmA"] = H.charStore({
 				bags = H.dbItems({ { id = 101, count = 3, ilvl = 645, link = l645 } }),
 				equipped = H.dbItems({ { id = 101, count = 1, ilvl = 658, link = l658 } }),
 				auctions = H.dbItems({ { id = 101, count = 2, ilvl = 645, link = l645 } }),
+				mail = H.dbItems({ { id = 101, count = 2, ilvl = 645, link = l645 } }),
 			}),
 			["Bram-RealmA"] = H.charStore({
 				bank = H.dbItems({ { id = 101, count = 2, ilvl = 658, link = l658 } }),
@@ -414,13 +705,16 @@ end
 test("get_merges_every_source_kind", function()
 	local ns = loadAddon({ noPEW = true, db = worldDB })
 	local agg = ns.Get(101)
-	assertEq(agg.total, 15)
+	assertEq(agg.total, 19)
 	assertEq(agg.sources,
-		{ bags = 2, bank = 2, equipped = 1, warband = 4, alts = { Liara = 4, Bram = 2 } })
-	assertEq(agg.groups[645].count, 10)
-	assertEq(agg.groups[645].sources, { bags = 2, bank = 1, warband = 4, alts = { Liara = 3 } })
-	assertEq(agg.groups[658].count, 5)
-	assertEq(agg.groups[658].sources, { bank = 1, equipped = 1, alts = { Liara = 1, Bram = 2 } })
+		{ bags = 2, bank = 2, equipped = 1, mail = 2, warband = 4,
+			alts = { Liara = 6, Bram = 2 } })
+	assertEq(agg.groups[645].count, 13)
+	assertEq(agg.groups[645].sources,
+		{ bags = 2, bank = 1, mail = 1, warband = 4, alts = { Liara = 5 } })
+	assertEq(agg.groups[658].count, 6)
+	assertEq(agg.groups[658].sources,
+		{ bank = 1, equipped = 1, mail = 1, alts = { Liara = 1, Bram = 2 } })
 	H.assertNoZeros(agg.sources)
 end)
 
@@ -428,7 +722,10 @@ test("get_invariants_under_every_filter", function()
 	local ns = loadAddon({ noPEW = true, db = worldDB })
 	H.eachFilter(function(f)
 		local expected = 2 + (f.bank and 2 or 0) + (f.equipped and 1 or 0) + (f.warband and 4 or 0)
-			+ (f.alts and (3 + (f.altEquipped and 1 or 0) + 2) or 0)
+			+ (f.mail and 2 or 0) -- own inbox 1 + own pending credit 1
+			-- Liara's mail rides her per-alt number UNgated by f.mail (bags 3 + mail 2
+			-- + equipped behind its own checkbox), Bram's bank 2.
+			+ (f.alts and (3 + 2 + (f.altEquipped and 1 or 0) + 2) or 0)
 		local agg = ns.Get(101, f)
 		assertEq(agg.total, expected, "filtered total")
 		assertEq(H.sumSources(agg.sources), agg.total, "sources sum to the total")
@@ -442,17 +739,21 @@ test("get_invariants_under_every_filter", function()
 		assertEq(groupSum, agg.total, "groups sum to the total")
 	end)
 	-- Owned only in a filtered-out source: nil, not an all-zero aggregate.
-	assertEq(ns.Get(401, { bags = true, bank = false, warband = true, equipped = true, alts = true }), nil)
-	-- Hidden alts drop out of total and sources alike.
-	local agg = ns.Get(101, { bags = true, bank = true, warband = true, equipped = true, alts = true,
-		altEquipped = true, hiddenChars = { ["Liara-RealmA"] = true } })
-	assertEq(agg.total, 11)
+	assertEq(ns.Get(401, { bags = true, bank = false, warband = true, equipped = true,
+		mail = true, alts = true }), nil)
+	-- Hidden alts drop out of total and sources alike (mail included).
+	local agg = ns.Get(101, { bags = true, bank = true, warband = true, equipped = true,
+		mail = true, alts = true, altEquipped = true,
+		hiddenChars = { ["Liara-RealmA"] = true } })
+	assertEq(agg.total, 13)
 	assertEq(agg.sources.alts, { Bram = 2 })
 end)
 
 test("get_auctions_only_scope", function()
 	local ns = loadAddon({ noPEW = true, db = worldDB })
-	-- Alts included: own listings under the "auctions" tag, alts folded by name.
+	-- Alts included: own listings under the "auctions" tag, alts folded by name. The
+	-- exact sources assertions below double as the reverse no-leak lock: the world also
+	-- holds mail stores, and none of their counts may surface in the auction scope.
 	local agg = ns.Get(101, { auctionsOnly = true, alts = true })
 	assertEq(agg.total, 3)
 	assertEq(agg.sources, { auctions = 1, alts = { Liara = 2 } })
@@ -476,7 +777,7 @@ test("auctions_never_leak_into_normal_scope", function()
 	-- The normal path must never visit auction stores: a nil filter ("everything") and
 	-- every display-filter combination all exclude the auction fixtures seeded above.
 	-- (The totals themselves are locked by the two tests above; this pins the key.)
-	assertEq(ns.Get(101).total, 15)
+	assertEq(ns.Get(101).total, 19)
 	assertEq(ns.Get(101).sources.auctions, nil)
 	H.eachFilter(function(f)
 		assertTrue(ns.Get(101, f).sources.auctions == nil,
@@ -514,18 +815,40 @@ end)
 test("get_representative_precedence_follows_visit_order", function()
 	local ns = loadAddon({ noPEW = true, db = function(S)
 		S.defineItem(102, { name = "Dropped Helm", equipLoc = "INVTYPE_HEAD" })
+		S.defineItem(103, { name = "Worn Blade", equipLoc = "INVTYPE_WEAPON" })
 		local lBank = S.link(102, "bankrep", { ilvl = 613 })
 		local lWb = S.link(102, "wbrep", { ilvl = 613 })
+		local lEq = S.link(103, "equiprep", { ilvl = 620 })
+		local lWb2 = S.link(103, "wbrep2", { ilvl = 620 })
+		S.defineItem(104, { name = "Parcel Helm", equipLoc = "INVTYPE_HEAD" })
+		local lMail = S.link(104, "mailrep", { ilvl = 630 })
+		local lWb3 = S.link(104, "wbrep3", { ilvl = 630 })
 		return H.db({
 			chars = {
 				[H.OWN] = H.charStore({
-					bags = H.dbItems({ { id = 102, count = 1, ilvl = 613 } }), -- no representatives
+					bags = H.dbItems({ -- no representatives
+						{ id = 102, count = 1, ilvl = 613 },
+						{ id = 103, count = 1, ilvl = 620 },
+					}),
 					bank = H.dbItems({ { id = 102, count = 1, ilvl = 613, link = lBank,
 						track = { name = "Hero", step = 1, max = 6 } } }),
+					equipped = H.dbItems({ { id = 103, count = 1, ilvl = 620, link = lEq,
+						track = { name = "Champion", step = 3, max = 8 } } }),
+					mail = H.dbItems({
+						{ id = 103, count = 1, ilvl = 620, link = S.link(103, "mailrep2", { ilvl = 620 }) },
+						{ id = 104, count = 1, ilvl = 630, link = lMail,
+							track = { name = "Veteran", step = 2, max = 8 } },
+					}),
 				}),
 			},
-			warband = H.dbItems({ { id = 102, count = 1, ilvl = 613, link = lWb,
-				track = { name = "Myth", step = 5, max = 6 } } }),
+			warband = H.dbItems({
+				{ id = 102, count = 1, ilvl = 613, link = lWb,
+					track = { name = "Myth", step = 5, max = 6 } },
+				{ id = 103, count = 1, ilvl = 620, link = lWb2,
+					track = { name = "Myth", step = 5, max = 6 } },
+				{ id = 104, count = 1, ilvl = 630, link = lWb3,
+					track = { name = "Myth", step = 5, max = 6 } },
+			}),
 		})
 	end })
 	local agg = ns.Get(102)
@@ -533,6 +856,18 @@ test("get_representative_precedence_follows_visit_order", function()
 	-- warband's lose (first non-nil in visit order).
 	assertTrue(agg.link and agg.link:find("bankrep", 1, true) ~= nil, "entry link from the bank")
 	assertEq(agg.groups[613].track.name, "Hero")
+	-- Deeper in the own chain: equipped still beats mail and warband (locks the full
+	-- own-store order "bags > bank > equipped > mail > warband" against insertions
+	-- shifting it).
+	local agg2 = ns.Get(103)
+	assertTrue(agg2.link and agg2.link:find("equiprep", 1, true) ~= nil,
+		"entry link from equipped over mail and warband")
+	assertEq(agg2.groups[620].track.name, "Champion")
+	-- And mail beats warband when it is the first store carrying a representative.
+	local agg3 = ns.Get(104)
+	assertTrue(agg3.link and agg3.link:find("mailrep", 1, true) ~= nil,
+		"entry link from mail over warband")
+	assertEq(agg3.groups[630].track.name, "Veteran")
 end)
 
 test("same_name_alts_across_realms_merge_in_display", function()
@@ -633,13 +968,13 @@ end)
 
 test("merge_sources_sums_tags_and_alts", function()
 	local ns = loadAddon({ noPEW = true })
-	local dst = { bags = 1, alts = { Liara = 2 } }
-	ns.MergeSources(dst, { bags = 2, bank = 3, warband = 1, equipped = 4, auctions = 2,
+	local dst = { bags = 1, mail = 2, alts = { Liara = 2 } }
+	ns.MergeSources(dst, { bags = 2, bank = 3, warband = 1, equipped = 4, mail = 5, auctions = 2,
 		alts = { Liara = 1, Bram = 4 } })
-	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, auctions = 2,
+	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, mail = 7, auctions = 2,
 		alts = { Liara = 3, Bram = 4 } })
 	ns.MergeSources(dst, {}) -- empty source: no-op, and no zero keys appear
-	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, auctions = 2,
+	assertEq(dst, { bags = 3, bank = 3, warband = 1, equipped = 4, mail = 7, auctions = 2,
 		alts = { Liara = 3, Bram = 4 } })
 end)
 
@@ -659,6 +994,35 @@ test("delete_char_guards", function()
 	ns.DeleteChar(H.OWN) -- the current character is never deletable
 	assertTrue(db.chars[H.OWN] ~= nil, "own data survives a self-delete attempt")
 	ns.DeleteChar(nil) -- and nil must not error
+end)
+
+test("unknown_char_substores_are_inert", function()
+	-- Additive versioning promise, data-layer side: a NEWER addon version may add source
+	-- stores to a char entry without bumping DB_VERSION (the settings analog is
+	-- unknown_settings_keys_ride_along) -- so this version must treat unrecognized
+	-- sub-tables as inert data: never counted, never an error, never clobbered.
+	local ns, S = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		local char = H.charStore({ bags = H.dbItems({ { id = 301, count = 1 } }) })
+		char.futureStore = H.snap(H.dbItems({ { id = 301, count = 50 } }))
+		char.futurePending = { { sentAt = 900, items = H.dbItems({ { id = 301, count = 9 } }) } }
+		local alt = H.charStore({ bags = H.dbItems({ { id = 301, count = 2 } }) })
+		alt.futureStore = H.snap(H.dbItems({ { id = 301, count = 7 } }))
+		return H.db({ chars = { [H.OWN] = char, ["Liara-RealmA"] = alt } })
+	end })
+	local agg = ns.Get(301)
+	assertEq(agg.total, 3) -- the unknown stores contribute nothing, own or alt
+	assertEq(agg.sources, { bags = 1, alts = { Liara = 2 } })
+	local _, _, combined = ns.GetByName(301)
+	assertEq(combined.total, 3)
+	-- Scans replace only their own store; unknown keys ride along untouched.
+	S.fire("BAG_UPDATE_DELAYED")
+	local char = _G.ExactItemCountDB.chars[H.OWN]
+	assertTrue(char.futureStore ~= nil and char.futurePending ~= nil,
+		"a rescan leaves unknown sub-stores in place")
+	-- DeleteChar is store-agnostic: the whole entry goes, unknown keys included.
+	ns.DeleteChar("Liara-RealmA")
+	assertEq(_G.ExactItemCountDB.chars["Liara-RealmA"], nil)
 end)
 
 test("delete_char_refused_while_own_key_unresolved", function()
