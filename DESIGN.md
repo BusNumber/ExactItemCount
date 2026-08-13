@@ -556,7 +556,7 @@ buy invalidation bugs.
 
 ## WoW API implementation notes (gotchas)
 
-Facts about the current API surface (Midnight, 12.0.x). Most of these are the reason
+Facts about the current API surface (Midnight, 12.1.x). Most of these are the reason
 a given line of code looks the way it does.
 
 - **Identify the hovered item by `data.id`, not the link.** `TooltipData` for an item
