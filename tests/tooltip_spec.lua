@@ -956,14 +956,18 @@ test("mail_total_includes_snapshot_and_pending", function()
 		return H.db({ chars = { [H.OWN] = H.charStore({
 			bags = H.dbItems({ { id = 301, count = 1 } }),
 			mail = H.dbItems({ { id = 301, count = 2 } }),
-			mailPending = { H.pending(900, { { id = 301, count = 4 } }) },
+			mailPending = {
+				H.pending(900, { { id = 301, count = 4 } }),
+				H.pending(950, { { id = 301, count = 5 } }),
+			},
 		}) } })
 	end })
 	local tip = H.hover({ id = 301 })
 	H.assertSectionInvariant(tip)
 	-- Mailbox contents are unconditionally owned: unlike listings, they join the grand
-	-- total -- and the inbox snapshot plus the in-transit credit sum into ONE mail token.
-	assertEq(H.plainLines(tip)[2], "Total items owned: 7 (bags 1" .. DOT .. "mail 6)")
+	-- total -- and the inbox snapshot plus EVERY fresh in-transit credit batch (send
+	-- credits stack with AH purchase credits) sum into ONE mail token.
+	assertEq(H.plainLines(tip)[2], "Total items owned: 12 (bags 1" .. DOT .. "mail 11)")
 end)
 
 test("alt_mail_ungated_by_own_mail_mode", function()
@@ -997,6 +1001,7 @@ test("mail_absent_from_auction_section", function()
 		return H.db({ chars = {
 			[H.OWN] = H.charStore({
 				mail = H.dbItems({ { id = 301, count = 2 } }),
+				mailPending = { H.pending(900, { { id = 301, count = 5 } }) },
 				auctions = H.dbItems({ { id = 301, count = 3 } }),
 			}),
 			["Liara-RealmA"] = H.charStore({ mail = H.dbItems({ { id = 301, count = 4 } }) }),
@@ -1006,12 +1011,36 @@ test("mail_absent_from_auction_section", function()
 	local tip = H.hover({ id = 301 })
 	H.assertSectionInvariant(tip)
 	-- Mail is owned (in the total); listings are not (their own scope below). Neither
-	-- number bleeds into the other, and no mail count can appear in the auction block.
+	-- number bleeds into the other, and no mail count -- inbox snapshot or in-transit
+	-- credit -- can appear in the auction block.
 	assertEq(H.plainLines(tip), {
 		" ",
-		"Total items owned: 6 (mail 2" .. DOT .. "Liara 4)",
+		"Total items owned: 11 (mail 7" .. DOT .. "Liara 4)",
 		"On auction: 3 (yours 3)",
 	})
+end)
+
+test("ah_credit_renders_in_mail_token", function()
+	-- An AH purchase credit is presentation-wise indistinguishable from a send credit:
+	-- it sums into the own `mail` token, joins the grand total, follows the Mail
+	-- tri-state, and never surfaces as an "On auction" section.
+	local ns, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 30)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED") -- the signal that actually fires on 12.1
+	S.fire("AUCTION_HOUSE_CLOSED")
+	local function line2() return H.plainLines(H.hover({ id = 301 }))[2] end
+	assertEq(line2(), "Total items owned: 30 (mail 30)")
+	ns.GetSettings().mailMode = "never"
+	assertEq(line2(), "Total items owned: 0")
+	ns.GetSettings().mailMode = "always"
+	local tip = H.hover({ id = 301 })
+	H.assertSectionInvariant(tip)
+	for _, line in ipairs(H.plainLines(tip)) do
+		assertTrue(line:find("On auction", 1, true) == nil, "no auction section for a mail credit")
+	end
 end)
 
 test("mail_mode_modifier_matters", function()

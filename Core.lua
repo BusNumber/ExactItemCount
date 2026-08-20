@@ -47,6 +47,16 @@ local ahOpen = false
 local mailOpen = false
 local sendSnapshot -- outgoing attachment slots as an items table, rebuilt on MAIL_SEND_INFO_UPDATE
 local pendingSend  -- { recipientKey, items } stashed by the SendMail hook until the send resolves
+-- AH purchase/cancel intents (see the hook block at the end of the file). None persist:
+-- an intent the finalization event never resolves dies with the AH visit.
+local commodityIntent    -- { itemID, quantity, wonQty? } stashed by the ConfirmCommoditiesPurchase
+                         -- hook; wonQty is the actual fill when the won-toast landed pre-commit
+local commodityCancelled -- the demoted intent (Blizzard's BuyDialog cancels on hide, success included)
+local commodityCommitted -- { itemID, quantity, link, batch } -- the last committed commodity
+                         -- credit, kept so a late actual-fill report can shrink it (never grow)
+local pendingBuyouts = {} -- [auctionID] = { id?, link?, ilvl? } stashed by the PlaceBid hook
+                          -- (fields optional: an empty entry means "bid in flight, item unknown")
+local pendingCancels = {} -- [auctionID] = { id, link, ilvl, qty } stashed by the CancelAuction hook
 
 -- Bag range for the player's inventory: backpack (0), the four carried bags (1-4)
 -- and the reagent bag (5). These Enum values are contiguous, so a numeric loop works.
@@ -75,6 +85,7 @@ local GetCurrentItemLevel     = C_Item.GetCurrentItemLevel
 local GetDetailedItemLevelInfo = C_Item.GetDetailedItemLevelInfo
 local GetItemInfoInstant      = C_Item.GetItemInfoInstant
 local GetItemNameByID         = C_Item.GetItemNameByID
+local GetItemInfo             = C_Item.GetItemInfo -- (name, link, ...); nil until the item's data loads
 local GetBagItemTooltip       = C_TooltipInfo and C_TooltipInfo.GetBagItem
 local GetInventoryItemTooltip = C_TooltipInfo and C_TooltipInfo.GetInventoryItem
 local GetInventoryItemID      = GetInventoryItemID    -- global; (unit, slot) -> itemID|nil
@@ -82,6 +93,7 @@ local GetInventoryItemLink    = GetInventoryItemLink  -- global; (unit, slot) ->
 local QueryOwnedAuctions      = C_AuctionHouse and C_AuctionHouse.QueryOwnedAuctions
 local GetOwnedAuctions        = C_AuctionHouse and C_AuctionHouse.GetOwnedAuctions
 local HasFullOwnedAuctionResults = C_AuctionHouse and C_AuctionHouse.HasFullOwnedAuctionResults
+local GetAuctionInfoByID      = C_AuctionHouse and C_AuctionHouse.GetAuctionInfoByID
 local CheckInbox              = CheckInbox            -- globals; the mail API was never C_-namespaced
 local GetInboxNumItems        = GetInboxNumItems
 local GetInboxHeaderInfo      = GetInboxHeaderInfo
@@ -97,6 +109,10 @@ local GetSendMailItemTooltip  = C_TooltipInfo and C_TooltipInfo.GetSendMailItem
 -- the item is gone, its proceeds arrive as gold via mail. An absent status field must
 -- never drop a listing, so the comparison is against the Active value, not "truthy".
 local AUCTION_STATUS_ACTIVE = Enum.AuctionStatus and Enum.AuctionStatus.Active or 0
+
+-- The "you won an item auction" value of AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION's
+-- first payload arg (buyer's chat toast). Numeric fallback mirrors AUCTION_STATUS_ACTIVE.
+local AUCTION_NOTIFY_WON = Enum.AuctionHouseNotification and Enum.AuctionHouseNotification.AuctionWon or 2
 
 -- Mailbox open/close is driven by the interaction manager (Blizzard's own MailFrame
 -- registers neither MAIL_SHOW nor the dead-since-10.0 MAIL_CLOSED); both legacy events
@@ -408,6 +424,81 @@ local function FreshPending(batch, now)
 	return type(batch) == "table"
 		and type(batch.sentAt) == "number" and (now - batch.sentAt) < MAIL_PENDING_SECONDS
 		and type(batch.items) == "table"
+end
+
+-- Appends one optimistic in-transit credit batch to a character's mailPending -- the
+-- shared commit for every credit writer (mail sends, and the AH purchase/cancel credits
+-- below). A nil char or an empty items table appends nothing: crediting degrades to
+-- "not recorded", never to a zero-item batch or a resurrected character entry. Returns
+-- the appended batch (nil when nothing was appended) so the commodity commit can keep a
+-- reference for the downward quantity adjust.
+local function CommitPendingBatch(char, items)
+	if not (char and items and next(items)) then return nil end
+	local pending = char.mailPending
+	if not pending then
+		pending = {}
+		char.mailPending = pending
+	end
+	local batch = { sentAt = time(), items = items }
+	pending[#pending + 1] = batch
+	return batch
+end
+
+-- One-stack items table for an AH purchase/cancel credit, built fresh per commit (a
+-- table shared between batches would alias). Listings carry no readable tooltip data,
+-- so no upgrade track (nil fetchTip); ilvl mirrors ScanAuctions -- the itemKey value
+-- when positive, the link as fallback, 0 for commodities.
+local function CreditItems(id, qty, link, ilvl)
+	if not (ilvl and ilvl > 0) and link then
+		ilvl = GetDetailedItemLevelInfo(link)
+	end
+	local items = {}
+	RecordStack(items, id, qty, link, ilvl or 0, nil)
+	return items
+end
+
+-- The one commodity commit point: appends the credit, remembers the batch for the
+-- downward adjust, and consumes both intent slots -- whichever finalization signal
+-- lands first commits, the rest then find no slot and no-op. The representative link
+-- is best-effort from the item cache (the item was just on screen at the AH); nil is
+-- tolerated everywhere, like a linkless commodity listing.
+local function CommitCommodity(itemID, qty)
+	local link = GetItemInfo and select(2, GetItemInfo(itemID)) or nil
+	local batch = CommitPendingBatch(EnsureChar(), CreditItems(itemID, qty, link, 0))
+	commodityCommitted = batch
+		and { itemID = itemID, quantity = qty, link = link, batch = batch }
+		or nil
+	commodityIntent, commodityCancelled = nil, nil
+end
+
+-- Commits every stashed cancel whose listing is GONE from a complete owned-listings
+-- result set. This is the commodity-cancel commit path: AUCTION_CANCELED's payload is
+-- only trustworthy for item listings -- a commodity-listing cancel fires it with a
+-- junk low value (observed in-game: 1), so the fallback keys on the one fact the
+-- refresh proves, the listing's absence. Absence from a COMPLETE list means
+-- returned-by-mail: a sold listing never vanishes mid-session (its status flips to
+-- Sold until the proceeds are collected -- at a mailbox, which can't happen while the
+-- AH is open), and the only other exit, expiry, mails the items back too. A refused
+-- cancel leaves its listing present, so its entry commits nothing and dies at AH
+-- close. The ScanAuctions never-wipe guards apply verbatim: a nil or partial result
+-- set proves nothing and commits nothing.
+local function SweepPendingCancels()
+	if not next(pendingCancels) then return end
+	local list = GetOwnedAuctions and GetOwnedAuctions()
+	if not list then return end
+	if HasFullOwnedAuctionResults and not HasFullOwnedAuctionResults() then return end
+	local present = {}
+	for _, auction in ipairs(list) do
+		if auction.auctionID then
+			present[auction.auctionID] = true -- any status: Sold stays present, must not commit
+		end
+	end
+	for auctionID, e in pairs(pendingCancels) do
+		if not present[auctionID] then
+			pendingCancels[auctionID] = nil
+			CommitPendingBatch(EnsureChar(), CreditItems(e.id, e.qty, e.link, e.ilvl))
+		end
+	end
 end
 
 -- The character's mailbox. Readable only while the mailbox is open and only as far as
@@ -742,8 +833,11 @@ end
 -- so a full rebuild per change is fine.
 -- Auctions follow the bank's open-flag pattern: the owned-listings query is fired when
 -- the AH opens, and OWNED_AUCTIONS_UPDATED rescans only while the flag is up -- a stray
--- post-close event must not scan stale API state. The close handler just clears the
--- flag, idempotent like BANKFRAME_CLOSED.
+-- post-close event must not scan stale API state. The close handler clears the flag
+-- (idempotent like BANKFRAME_CLOSED) plus the purchase/cancel intent stashes below it.
+-- The COMMODITY_* / AUCTION_HOUSE_PURCHASE_COMPLETED / AUCTION_CANCELED branches are
+-- the finalization side of the AH crediting hooks at the end of this file: each commits
+-- an in-transit mail credit only when its event resolves a stashed intent.
 -- Mail mirrors the auction shape with the interaction manager as the primary open/close
 -- signal (arg == MailInfo, exact match -- bank/merchant hides must not cross-talk;
 -- MAIL_SHOW/MAIL_CLOSED stay registered as belts). Opening asks the server for the inbox
@@ -763,6 +857,14 @@ frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 frame:RegisterEvent("AUCTION_HOUSE_SHOW")
 frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
 frame:RegisterEvent("OWNED_AUCTIONS_UPDATED")
+frame:RegisterEvent("COMMODITY_PURCHASED")
+frame:RegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
+frame:RegisterEvent("COMMODITY_PURCHASE_FAILED")
+frame:RegisterEvent("COMMODITY_PRICE_UNAVAILABLE")
+frame:RegisterEvent("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION")
+frame:RegisterEvent("AUCTION_HOUSE_PURCHASE_COMPLETED")
+frame:RegisterEvent("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION")
+frame:RegisterEvent("AUCTION_CANCELED")
 frame:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW")
 frame:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_HIDE")
 frame:RegisterEvent("MAIL_SHOW")
@@ -772,7 +874,7 @@ frame:RegisterEvent("MAIL_SEND_INFO_UPDATE")
 frame:RegisterEvent("MAIL_SEND_SUCCESS")
 frame:RegisterEvent("MAIL_FAILED")
 frame:RegisterEvent("MAIL_UNLOCK_SEND_ITEMS")
-frame:SetScript("OnEvent", function(self, event, arg1)
+frame:SetScript("OnEvent", function(self, event, arg1, arg2, arg3)
 	if event == "ADDON_LOADED" then
 		if arg1 ~= addonName then return end
 		if not (ExactItemCountDB and ExactItemCountDB.version == DB_VERSION and ExactItemCountDB.chars) then
@@ -835,9 +937,140 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		ahOpen = true
 		if QueryOwnedAuctions then QueryOwnedAuctions({}) end
 	elseif event == "OWNED_AUCTIONS_UPDATED" then
-		if ahOpen then ScanAuctions() end
+		if ahOpen then
+			ScanAuctions()
+			SweepPendingCancels()
+		end
 	elseif event == "AUCTION_HOUSE_CLOSED" then
 		ahOpen = false
+		-- Unresolved purchase/cancel intents die with the AH visit: a finalization
+		-- event straggling in after close finds nothing and credits nothing -- the
+		-- send-credit close-discard discipline (undercount at worst, heals at the
+		-- mailbox), never a credit for a transaction whose outcome was never seen.
+		commodityIntent, commodityCancelled, commodityCommitted = nil, nil, nil
+		pendingBuyouts, pendingCancels = {}, {}
+	elseif event == "COMMODITY_PURCHASED" then
+		-- (itemID, quantity) -- on paper the best commodity signal (the actual fill),
+		-- but it has ZERO consumers in Blizzard's 12.1 client and never showed in an
+		-- in-game trace: treated as likely dead, kept as a legacy commit in case it
+		-- fires on some path. Intent-gated: with no matching Confirm stash this may be
+		-- a buyer taking YOUR listing, and a quantity above the request cannot be our
+		-- purchase; both leave the stash for the real resolution (SUCCEEDED below).
+		local slot = commodityIntent or commodityCancelled
+		if slot and slot.itemID == arg1
+			and type(arg2) == "number" and arg2 > 0 and arg2 <= slot.quantity then
+			CommitCommodity(arg1, arg2)
+		end
+	elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
+		-- Payload-free, but verifiably alive (Blizzard's BuyDialog hides on exactly
+		-- it) -- the working commit signal on 12.1. The quantity is the request,
+		-- refined to the actual fill when the won-toast landed first (wonQty); a
+		-- toast landing after the commit still shrinks the batch below. The demoted
+		-- slot MUST be accepted here: the dialog's own SUCCEEDED handler hides it,
+		-- whose OnHide cancel may demote the intent before this handler runs.
+		local slot = commodityIntent or commodityCancelled
+		if slot then
+			local qty = slot.quantity
+			if slot.wonQty and slot.wonQty < qty then qty = slot.wonQty end
+			CommitCommodity(slot.itemID, qty)
+		end
+	elseif event == "AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION" then
+		-- (commodityName, commodityQuantity) -- the buyer's "You won X" chat toast,
+		-- carrying the ACTUAL fill. Refiner only, NEVER a committer: a name+quantity
+		-- payload cannot be attributed safely enough to commit (a straggling toast
+		-- from purchase A must not credit a pending same-item purchase B -- see
+		-- DESIGN). Pre-commit it annotates the slot; post-commit it shrinks the
+		-- committed batch, downward only and only on a positively resolved name.
+		local qty = arg2
+		if type(qty) == "number" and qty > 0 then
+			local slot = commodityIntent or commodityCancelled
+			if slot and qty <= slot.quantity then
+				-- A resolved name mismatch proves the toast is not this purchase; an
+				-- unresolved name stays permissive (the slot's itemID is the real gate,
+				-- and quality tiers share names anyway -- accepted, undercount-only).
+				local name = GetItemInfo and GetItemInfo(slot.itemID) or nil
+				if not (name and arg1 and name ~= arg1) then
+					slot.wonQty = qty
+				end
+			elseif not slot and commodityCommitted and qty < commodityCommitted.quantity then
+				local c = commodityCommitted
+				local name = GetItemInfo and GetItemInfo(c.itemID) or nil
+				if name and arg1 and name == arg1 then
+					c.batch.items = CreditItems(c.itemID, qty, c.link, 0)
+					c.quantity = qty
+				end
+			end
+		end
+	elseif event == "COMMODITY_PURCHASE_FAILED" or event == "COMMODITY_PRICE_UNAVAILABLE" then
+		-- The purchase in flight died (server refusal, or the quote vanished before
+		-- confirmation): nothing was finalized, so the live intent and the demoted one
+		-- are both stale now. The committed reference survives -- a committed batch is
+		-- never retracted, and a late fill report may still need to shrink it.
+		commodityIntent, commodityCancelled = nil, nil
+	elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
+		-- (auctionID) -- Blizzard's own buyout finalization signal; a plain bid fires
+		-- BID_ADDED instead, so it can never commit. Observed in-game: it also fires
+		-- with auctionID 0 for COMMODITY purchases (undocumented), so non-positive ids
+		-- are ignored outright. The stashed entry may still lack item data
+		-- (GetAuctionInfoByID's whole return is optional): retry the lookup here, and
+		-- if it still won't resolve keep the entry for the won-toast fallback below.
+		if type(arg1) == "number" and arg1 > 0 then
+			local e = pendingBuyouts[arg1]
+			if e then
+				if not e.id then
+					local info = GetAuctionInfoByID and GetAuctionInfoByID(arg1)
+					local key = info and info.itemKey
+					if key and key.itemID then
+						e.id, e.link, e.ilvl = key.itemID, info.itemLink, key.itemLevel
+					end
+				end
+				if e.id then
+					pendingBuyouts[arg1] = nil
+					-- AuctionInfo has no quantity field: non-commodity listings are
+					-- single items (stackables are commodities since the 8.3 AH), so 1.
+					CommitPendingBatch(EnsureChar(), CreditItems(e.id, 1, e.link, e.ilvl))
+				end
+			end
+		end
+	elseif event == "AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION" then
+		-- (notification, text, auctionID?) -- the buyer's "You won an auction for X"
+		-- chat toast, the fallback identifier for a buyout whose item never resolved
+		-- through GetAuctionInfoByID (its text embeds the item link). Strictly keyed:
+		-- only a bid this session stashed may commit, a nil auctionID attributes to
+		-- nothing, and text without a complete item link is a no-op -- the entry then
+		-- dies at AH close (fails closed into "not recorded").
+		if arg1 == AUCTION_NOTIFY_WON and type(arg3) == "number" and arg3 > 0 then
+			local e = pendingBuyouts[arg3]
+			if e then
+				if not e.id and type(arg2) == "string" then
+					local link = arg2:match("|Hitem:.-|h%[.-%]|h")
+					if link then
+						e.id, e.link = GetItemInfoInstant(link), link
+					end
+				end
+				if e.id then
+					pendingBuyouts[arg3] = nil
+					CommitPendingBatch(EnsureChar(), CreditItems(e.id, 1, e.link, e.ilvl))
+				end
+			end
+		end
+	elseif event == "AUCTION_CANCELED" then
+		-- (auctionID) -- the async completion of CancelAuction; the cancelled stack
+		-- returns by mail. The payload is only trustworthy for ITEM listings: a
+		-- commodity-listing cancel fires this with a junk low value (observed: 1),
+		-- so an unmatched payload leaves the stash for the owned-list sweep. Either
+		-- way the owned-listings requery is nudged: it hands the sweep its complete
+		-- result set and drops the cancelled listing from the "On auction" scope;
+		-- until it lands, the brief mail+auction double-show is the documented
+		-- accepted staleness (the two scopes never sum into one number).
+		local e = pendingCancels[arg1]
+		if e then
+			pendingCancels[arg1] = nil
+			CommitPendingBatch(EnsureChar(), CreditItems(e.id, e.qty, e.link, e.ilvl))
+		end
+		if (e or next(pendingCancels)) and ahOpen and QueryOwnedAuctions then
+			QueryOwnedAuctions({})
+		end
 	elseif event == "MAIL_SHOW"
 		or (event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" and arg1 == INTERACTION_MAILBOX) then
 		-- Both signals may fire for one mailbox: query only on the closed->open edge.
@@ -853,19 +1086,11 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		if mailOpen then sendSnapshot = ScanSendSlots() end
 	elseif event == "MAIL_SEND_SUCCESS" then
 		-- Commit the stashed send into the recipient's pending credits. KnownCharKey only
-		-- returns keys already in db.chars, so the entry exists; the guard covers a
-		-- mid-session DeleteChar race. An empty stash (a plain letter, or nothing readable)
-		-- appends no batch -- credits degrade to "not recorded", never to a zero-item batch.
-		if pendingSend and pendingSend.items and next(pendingSend.items) and db then
-			local rc = db.chars[pendingSend.recipientKey]
-			if rc then
-				local pending = rc.mailPending
-				if not pending then
-					pending = {}
-					rc.mailPending = pending
-				end
-				pending[#pending + 1] = { sentAt = time(), items = pendingSend.items }
-			end
+		-- returns keys already in db.chars, so the entry exists; the nil-char guard inside
+		-- CommitPendingBatch covers a mid-session DeleteChar race, and an empty stash (a
+		-- plain letter, or nothing readable) appends no batch.
+		if pendingSend and db then
+			CommitPendingBatch(db.chars[pendingSend.recipientKey], pendingSend.items)
 		end
 		pendingSend, sendSnapshot = nil, nil
 	elseif event == "MAIL_FAILED" or event == "MAIL_UNLOCK_SEND_ITEMS" then
@@ -898,4 +1123,87 @@ if hooksecurefunc and type(SendMail) == "function" then
 			and { recipientKey = key, items = ScanSendSlots() or sendSnapshot }
 			or nil
 	end)
+end
+
+-- AH purchase/cancel crediting: bought and cancelled goods travel by mail, so each
+-- finalized transaction appends an in-transit credit to the OWN character's mailPending
+-- (the send-credit lifecycle verbatim: superseded by the next full inbox scan, 31-day
+-- prune). The hooks below only record intent -- commits ride the finalization events in
+-- the handler above, so a transaction that never resolves credits nothing. Stash writes
+-- are gated on ahOpen (the OWNED_AUCTIONS_UPDATED discipline: a stray call with the AH
+-- closed must not plant a lingering intent); the per-function type() guards are the
+-- SendMail rename insurance -- a renamed API silently disables its credit path only.
+if hooksecurefunc and C_AuctionHouse then
+	if type(C_AuctionHouse.ConfirmCommoditiesPurchase) == "function" then
+		-- (itemID, quantity) -- the moment the player commits to the quoted purchase.
+		hooksecurefunc(C_AuctionHouse, "ConfirmCommoditiesPurchase", function(itemID, quantity)
+			if not ahOpen then return end
+			if type(itemID) == "number" and type(quantity) == "number" and quantity > 0 then
+				commodityIntent = { itemID = itemID, quantity = quantity }
+				commodityCancelled, commodityCommitted = nil, nil
+			end
+		end)
+	end
+	if type(C_AuctionHouse.StartCommoditiesPurchase) == "function" then
+		-- A new quote flow: whatever purchase state preceded it is not this purchase.
+		hooksecurefunc(C_AuctionHouse, "StartCommoditiesPurchase", function()
+			commodityIntent, commodityCancelled, commodityCommitted = nil, nil, nil
+		end)
+	end
+	if type(C_AuctionHouse.CancelCommoditiesPurchase) == "function" then
+		-- Demote, don't discard: Blizzard's BuyDialog cancels on hide INCLUDING the
+		-- success path, and after a mid-session /reload its frames receive events
+		-- before this addon's -- a plain discard would then always run ahead of the
+		-- commit and no commodity credit could ever land. The demoted slot still
+		-- commits on COMMODITY_PURCHASED; the guard keeps a second Cancel call (there
+		-- is one per dialog hide) from wiping it.
+		hooksecurefunc(C_AuctionHouse, "CancelCommoditiesPurchase", function()
+			if commodityIntent then
+				commodityCancelled, commodityIntent = commodityIntent, nil
+			end
+		end)
+	end
+	if type(C_AuctionHouse.PlaceBid) == "function" then
+		-- (auctionID, bidAmount) -- covers bids AND buyouts (a buyout is a bid at the
+		-- buyout price); which one this was is undecidable here, so the stash is only
+		-- ever consumed by a finalization event naming this auctionID -- events only
+		-- buyouts fire. The entry is stashed even when GetAuctionInfoByID resolves
+		-- nothing (its whole return is optional, and Blizzard itself only queries it
+		-- BEFORE the confirm popup): an id-less entry marks "bid in flight" and gets
+		-- its item filled in at commit time or from the won-toast fallback.
+		hooksecurefunc(C_AuctionHouse, "PlaceBid", function(auctionID)
+			if not ahOpen or type(auctionID) ~= "number" or auctionID <= 0 then return end
+			local info = GetAuctionInfoByID and GetAuctionInfoByID(auctionID)
+			local key = info and info.itemKey
+			pendingBuyouts[auctionID] = {
+				id = key and key.itemID or nil,
+				link = info and info.itemLink or nil,
+				ilvl = key and key.itemLevel or nil,
+			}
+		end)
+	end
+	if type(C_AuctionHouse.CancelAuction) == "function" then
+		-- (ownedAuctionID). The stored auctions snapshot is aggregated per itemID+ilvl
+		-- and keeps no auctionIDs, so the listing's stack is read from the live owned
+		-- list while it still exists; a non-Active listing returns gold, not items,
+		-- and an unreadable list degrades to "not recorded", never to a wrong count.
+		hooksecurefunc(C_AuctionHouse, "CancelAuction", function(auctionID)
+			if not ahOpen or auctionID == nil then return end
+			local list = GetOwnedAuctions and GetOwnedAuctions()
+			if not list then return end
+			for _, auction in ipairs(list) do
+				if auction.auctionID == auctionID then
+					local id = auction.itemKey and auction.itemKey.itemID
+					if id and (auction.status == nil or auction.status == AUCTION_STATUS_ACTIVE) then
+						pendingCancels[auctionID] = {
+							id = id, link = auction.itemLink,
+							ilvl = auction.itemKey.itemLevel,
+							qty = auction.quantity or 1,
+						}
+					end
+					return
+				end
+			end
+		end)
+	end
 end

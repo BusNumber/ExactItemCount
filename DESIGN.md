@@ -267,6 +267,27 @@ Two stores feed the one number:
   that normalize to an existing character key are credited (bare name = own realm; a
   typed realm normalizes the way `GetNormalizedRealmName` does; case-insensitive) —
   mail to anyone else is a gift leaving your ownership, correctly counted nowhere.
+- **Auction-house credits** (same store, other writers) — buying from the AH and
+  cancelling an own listing both put goods in transit by mail, so each **finalized**
+  transaction appends the same kind of batch to the **current character's own**
+  `mailPending`: a commodity purchase commits on `COMMODITY_PURCHASE_SUCCEEDED` with
+  the *requested* quantity, refined to the **actual fill** by the buyer's "you won"
+  toast (`AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION`) — before the commit through
+  the intent, after it by shrinking the committed batch, downward only; the toast
+  itself never commits (see gotchas). An item buyout commits on
+  `AUCTION_HOUSE_PURCHASE_COMPLETED`; a cancel commits on `AUCTION_CANCELED` when its
+  payload matches the stashed intent (item listings) or — for commodity listings,
+  whose event payload carries a junk id — when the listing vanishes from the next
+  complete owned-listings refresh (cancelled stacks return by mail either way). The
+  hooks on
+  `ConfirmCommoditiesPurchase` / `PlaceBid` / `CancelAuction` record **intent only** —
+  the listing's stack is captured there from the live API, because the stored auctions
+  snapshot keeps no auctionIDs — and every commit requires its completion event to
+  resolve a stashed intent, so a transaction that never finalizes (failed, dead quote,
+  walked away, AH closed mid-flight) credits nothing: crediting degrades to "not
+  recorded", never to a wrong count (see gotchas for the 12.1-observed event surface
+  and its traps). From there the batch is an ordinary credit — same supersede, same
+  prune, same `mail` token.
 - **COD rule**: a Cash-on-Delivery package from a stranger is *not* yours until paid —
   its attachments are skipped — unless the sender is one of your own scanned
   characters (your own goods moving between alts stay owned throughout). Attached gold
@@ -276,9 +297,23 @@ Accepted staleness, all bounded: mail collected on another PC leaves this PC's c
 standing until that character next opens a mailbox here or the 31-day prune fires (the
 same SavedVariables limitation every snapshot has); a >100-message inbox blocks both
 the snapshot swap and the pending clear until Blizzard's own refetch loop converges
-(see gotchas); and a failed auction listing returned by mail can briefly show under
-both `On auction` (the stale listings snapshot) and `mail` — the two scopes never mix
-in one number, and the next AH visit heals it.
+(see gotchas — and heavy AH users, exactly whom the purchase credits serve, are the
+players most likely to run such inboxes); a mailbox opened after an AH purchase but
+**before** its mail is delivered supersedes the credit early — the goods vanish from
+the counts until the next mailbox visit after delivery (deliberate: any grace window
+that let a credit outlive an inbox scan could double-count the delivered stack inside
+one `mail` token, and a brief undercount heals where an inflated "owned" misleads);
+and a failed **or freshly cancelled** auction listing returned by mail can briefly
+show under both `On auction` (the stale listings snapshot) and `mail` — the two scopes
+never mix in one number, the cancel commit nudges an owned-listings requery so its
+case usually heals immediately, and the next AH visit heals the rest. Commodity
+credit *quantities* carry their own bounded staleness: the commit is the requested
+amount and the won-toast corrects it to the actual fill, so a partial fill whose
+toast never lands overcounts until the next inbox scan, while the toast's name-only
+payload can cross-talk between back-to-back purchases of two quality tiers (tiers
+share a display name) and its multi-fill semantics are unverified — every ambiguous
+toast path only ever *shrinks* a credit, so those miscounts are undercounts the
+inbox scan heals.
 
 The `mailMode` tri-state gates the **current character's** mail share only, like the
 equipped tri-state; there is deliberately **no** altMail checkbox — an alt's mail is
@@ -422,7 +457,7 @@ Settings layer: defaults/sanitizing for `db.settings`, the Options panel (vertic
 
 ### tests/
 
-Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank / auction / truncated-inbox never-wipe, auction-scope isolation (listings leak into no owned number, mail never leaks into the auction scope), the send-credit lifecycle (known-recipient normalization, commit/discard paths, supersede-on-scan, 31-day expiry), sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
+Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank / auction / truncated-inbox never-wipe, auction-scope isolation (listings leak into no owned number, mail never leaks into the auction scope), the send-credit lifecycle (known-recipient normalization, commit/discard paths, supersede-on-scan, 31-day expiry), the AH purchase/cancel credit lifecycle (intent-gated event commits with the won-toast quantity refiner, converging under every signal order; seller-side, overfill, dead-quote, close-discard and back-to-back-purchase guards; the demoted-cancel slot; the id-less buyout stash with its commit-time retry and toast-link fallback; the commodity-cancel owned-list sweep and its never-on-partial / never-while-present guards), sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
 ```
 
 Files share the private addon table via the `local addonName, ns = ...` vararg. **Keep
@@ -722,6 +757,64 @@ a given line of code looks the way it does.
   come up empty, no batch is appended: crediting degrades to "not recorded", never to
   wrong counts. `SendMail` itself is `noscript`-restricted (blocked from macros, free
   for addon code) and absent from the 11.0 `hooksecurefunc` blacklist.
+- **AH purchase/cancel crediting is intent-gated and event-committed — against the
+  event surface 12.1 actually FIRES, not the one the docs imply.** In-game tracing
+  (2026-08-19) plus Blizzard's 12.1.0 UI source established the surface: delivery is
+  by mail (never straight to bags); `COMMODITY_PURCHASED` and `ITEM_PURCHASED` are
+  declared but have **zero consumers in the whole client and did not observably
+  fire** — never build on them (a legacy `COMMODITY_PURCHASED` commit is kept,
+  harmless if the event is dead); `COMMODITY_PURCHASE_SUCCEEDED` is the real
+  commodity finalization (Blizzard's BuyDialog hides on exactly it) but is
+  **payload-free**, so it commits the *requested* quantity; the buyer's toast
+  `AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION(commodityName, commodityQuantity)`
+  carries the **actual fill** but only a name — it therefore **never commits** (a
+  straggling toast from purchase A must not credit a pending same-item purchase B),
+  only *refines*: pre-commit it annotates the intent, post-commit it shrinks the
+  committed batch, downward only and only on a positively resolved name; and
+  `AUCTION_HOUSE_PURCHASE_COMPLETED(auctionID)` is the buyout finalization (Blizzard's
+  BUYOUT_AUCTION popup waits on it; a plain bid fires `BID_ADDED` instead) which
+  **also fires with auctionID 0 for commodity purchases** (undocumented) — the
+  handler ignores non-positive ids. Intents come from
+  `hooksecurefunc(C_AuctionHouse, ...)` post-hooks — the table form, in-game-proven;
+  the calls are `hwevent,noscript`-restricted but not protected and not blocklisted.
+  Traps that shaped the code: Blizzard's own UI passes a **third** `unitPrice`
+  argument to `StartCommoditiesPurchase` (never assume the documented 2-arg signature
+  in a hook); `GetAuctionInfoByID`'s **whole return and every field but `itemKey` are
+  optional**, and Blizzard only ever calls it *before* the confirm popup — so the
+  `PlaceBid` hook stashes an entry even when the lookup resolves nothing (id-less =
+  "bid in flight"), the commit retries the lookup, and the last resort is the buyer's
+  "auction won" toast (`AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION`, `AuctionWon` +
+  optional auctionID + an item link embedded in the text), strictly keyed to a
+  stashed bid and failing closed when no complete link parses; AuctionInfo has **no
+  quantity field** (item listings are single items post-8.3 — buyout credits are qty
+  1); the cancel stack must be read from the live `GetOwnedAuctions()` list *inside
+  the hook* (the stored snapshot is aggregated and keeps no auctionIDs); and
+  `AUCTION_CANCELED(auctionID)` is two-faced the same way AHPC is — item-listing
+  cancels carry the real ownedAuctionID, commodity-listing cancels a junk low value
+  (observed in-game: 1; Blizzard's only consumer of the event discards the payload,
+  so the bug ships invisibly) — which is why cancel commits are keyed when the
+  payload matches and otherwise ride the owned-list refresh: a stashed cancel whose
+  listing is gone from a *complete* result set has finalized, because absence means
+  returned-by-mail — a sold listing never vanishes mid-session (its status flips to
+  Sold until the proceeds are collected at a mailbox, unreachable while the AH is
+  open) and the only other exit, expiry, mails the items back too; nil/partial
+  result sets prove nothing (the `ScanAuctions` never-wipe guards verbatim). The
+  cancel initiated from the commodity drill-down view technically passes an
+  aggregate search-row's auctionID rather than one read from the owned list — the
+  server accepts it, implying it is the own listing's id, but if a commodity cancel
+  ever fails to credit before the mailbox again, suspect the hook-side lookup
+  missing on exactly this. The biggest
+  one: Blizzard's BuyDialog **OnHide always calls `CancelCommoditiesPurchase` — on
+  the success path too** — and after a mid-session `/reload` Blizzard's frames
+  receive events before this addon's, so the cancel hook *demotes* the intent into a
+  one-slot holding area the commit still accepts rather than discarding it (a discard
+  would deterministically kill commodity credits for the session). The commodity
+  intent is a single slot by design — Blizzard serializes purchases through one
+  BuyDialog; concurrent API-driven purchases can misattribute a quantity, bounded and
+  healed by the next inbox scan. The toast's name-only payload cannot distinguish
+  quality tiers (tiers share a display name) and its multi-fill semantics are
+  unverified — every ambiguous toast path only ever shrinks a credit, so cross-talk
+  is an undercount the inbox scan heals.
 - **Bag iteration**: bags are `Enum.BagIndex.Backpack` (0) …
   `Enum.BagIndex.ReagentBag` (5), contiguous. Bank tabs post-11.2 rework: character
   `Enum.BagIndex.CharacterBankTab_1..6` (6–11), warband `AccountBankTab_1..5` (12–16) —

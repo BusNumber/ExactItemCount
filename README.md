@@ -67,7 +67,9 @@ On auction: 3 (yours 1 · Liara 2)
 (unlike a listing, mail is still unconditionally yours). And mailing something to one
 of your **own characters** doesn't make it fall off the map: it counts under the
 recipient's name from the moment the send succeeds until they collect it — no more
-"where did that stack of ore go":
+"where did that stack of ore go". The auction house's mail counts the same way:
+**items you buy** and **listings you cancel** show as your `mail` from the moment the
+transaction goes through until you collect them:
 
 ```
 Total items owned: 24 (bags 10 · mail 2 · Liara 12)
@@ -103,8 +105,9 @@ That's it. Options live under **Options → AddOns → Exact Item Count** (or `/
 - ✅ Recipes: the crafted item is counted too, with its own breakdown
 - ✅ Auction listings — a separate `On auction` count, never mixed into the owned total
   (updated when you visit the auction house)
-- ✅ Mail — items in your mailbox (updated when you open it), plus mail in transit to
-  your own characters, counted under the recipient until collected
+- ✅ Mail — items in your mailbox (updated when you open it), plus mail in transit:
+  items sent to your own characters (counted under the recipient), and your auction
+  house purchases and cancelled listings (counted as your mail) — until collected
 - ✅ Where-it-is breakdown on every count
 - ✅ Settings (display-only filtering — what's counted on screen, never what's cached)
 - ⬜ Amount of gold *(planned)*

@@ -471,6 +471,52 @@ test("mail_cod_excluded_unless_known_sender", function()
 	assertEq(_G.ExactItemCountDB.chars[H.OWN].mail.items[301].total, 6)
 end)
 
+test("mail_scan_nonempty_supersedes_pending", function()
+	-- The supersede rides ANY successful snapshot swap, not just the empty-inbox one
+	-- (locked above): a non-empty full read replaces the optimistic credits with inbox
+	-- reality wholesale.
+	local _, S = loadAddon({
+		setup = function(S)
+			S.defineItem(301, { name = "Acorn" })
+			S.setInbox({ { sender = "X", attachments = { { id = 301, count = 3 } } } })
+		end,
+		db = function()
+			return H.db({ chars = { [H.OWN] = H.charStore({
+				mailPending = { H.pending(900, { { id = 301, count = 4 } }) },
+			}) } })
+		end, noPEW = true })
+	S.fire("MAIL_SHOW")
+	S.fire("MAIL_INBOX_UPDATE")
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(own.mail.items[301].total, 3)
+	assertEq(own.mailPending, nil)
+end)
+
+test("mail_pending_never_merged_into_snapshot", function()
+	-- Credits are optimistic DISPLAY data: they are never written into the
+	-- authoritative inbox snapshot -- not while standing, and not by the supersede
+	-- (which simply drops them; the inbox then reflects reality on its own).
+	local _, S = loadAddon({
+		setup = function(S)
+			S.defineItem(301, { name = "Acorn" })
+			S.defineItem(302, { name = "Birch" })
+			S.setInbox({ { sender = "X", attachments = { { id = 301, count = 3 } } } })
+		end,
+		db = function()
+			return H.db({ chars = { [H.OWN] = H.charStore({
+				mail = H.dbItems({ { id = 301, count = 1 } }),
+				mailPending = { H.pending(900, { { id = 302, count = 4 } }) },
+			}) } })
+		end, noPEW = true })
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(own.mail.items[302], nil) -- standing credit: absent from the stored snapshot
+	S.fire("MAIL_SHOW")
+	S.fire("MAIL_INBOX_UPDATE")
+	assertEq(own.mail.items[301].total, 3)
+	assertEq(own.mail.items[302], nil) -- superseded means dropped, never merged in
+	assertEq(own.mailPending, nil)
+end)
+
 -- ---------------------------------------------------------------- send crediting
 
 test("send_credit_commit_on_success", function()
@@ -585,6 +631,47 @@ test("send_credit_unknown_recipient_uncredited", function()
 	assertEq(_G.ExactItemCountDB.chars["Liara-TestRealm"].mailPending, nil)
 end)
 
+test("send_credit_own_key_commit", function()
+	-- Mail-to-self: KnownCharKey has no self-exclusion and the commit is a plain
+	-- db.chars lookup, so an own-name recipient credits the OWN key -- and the batch
+	-- joins the own `mail` share, not an alt number. (The AH purchase/cancel credits
+	-- ride exactly this own-key path.)
+	local ns, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 301, count = 5 })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	_G.SendMail("tester") -- bare own name, case-insensitive
+	S.fire("MAIL_SEND_SUCCESS")
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].items[301].total, 5)
+	assertEq(ns.Get(301).sources, { mail = 5 })
+end)
+
+test("send_credit_recipient_normalization_positive", function()
+	-- The positive twin of the unknown-recipient test: a lowercase bare name lands on
+	-- the own realm's key, and a typed "Name-Realm With Spaces" normalizes the way
+	-- GetNormalizedRealmName does (spaces stripped, case-insensitive).
+	local _, S = loadAddon({ db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({ chars = {
+			["Liara-TestRealm"] = H.charStore({}),
+			["Bram-AzjolNerub"] = H.charStore({}),
+		} })
+	end })
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 301, count = 5 })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	_G.SendMail("liara")
+	S.fire("MAIL_SEND_SUCCESS")
+	assertEq(_G.ExactItemCountDB.chars["Liara-TestRealm"].mailPending[1].items[301].total, 5)
+	_G.SendMail("bram-Azjol Nerub") -- the hook's slot re-read still finds the attachment
+	S.fire("MAIL_SEND_SUCCESS")
+	assertEq(_G.ExactItemCountDB.chars["Bram-AzjolNerub"].mailPending[1].items[301].total, 5)
+end)
+
 test("mail_pending_pruned_at_load_and_skipped_at_read", function()
 	local DAY = 24 * 60 * 60
 	local ns, S = loadAddon({ noPEW = true,
@@ -596,6 +683,7 @@ test("mail_pending_pruned_at_load_and_skipped_at_read", function()
 				["Liara-TestRealm"] = H.charStore({ mailPending = {
 					{ sentAt = 39 * DAY, items = H.dbItems({ { id = 301, count = 5 } }) }, -- 1d old
 					{ sentAt = 5 * DAY, items = H.dbItems({ { id = 301, count = 9 } }) },  -- 35d old
+					{ sentAt = 9 * DAY, items = H.dbItems({ { id = 301, count = 7 } }) },  -- exactly 31d: expired (strict <)
 					"junk", -- hand-edited garbage must prune, not error
 				} }),
 				["Bram-TestRealm"] = H.charStore({ mailPending = {
@@ -604,7 +692,7 @@ test("mail_pending_pruned_at_load_and_skipped_at_read", function()
 			} })
 		end })
 	local liara = _G.ExactItemCountDB.chars["Liara-TestRealm"]
-	assertEq(#liara.mailPending, 1) -- the expired batch and the junk pruned at load
+	assertEq(#liara.mailPending, 1) -- the expired batches (35d and the 31d boundary) and the junk pruned at load
 	assertEq(liara.mailPending[1].sentAt, 39 * DAY)
 	assertEq(_G.ExactItemCountDB.chars["Bram-TestRealm"].mailPending, nil) -- emptied -> nil
 	assertEq(ns.Get(301).total, 6) -- own bags 1 + Liara's fresh credit 5
@@ -613,6 +701,549 @@ test("mail_pending_pruned_at_load_and_skipped_at_read", function()
 	S.advance(31 * DAY)
 	assertEq(ns.Get(301).total, 1)
 	assertEq(ns.Get(301).sources.alts, nil)
+end)
+
+-- ------------------------------------------------- AH purchase/cancel crediting
+
+test("commodity_credit_commit_on_purchased", function()
+	local ns, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn", reagent = 2 })
+	end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	S.advance(50)
+	_G.C_AuctionHouse.StartCommoditiesPurchase(301, 100, 77) -- Blizzard passes a 3rd arg (unitPrice)
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 100)
+	S.fire("COMMODITY_PURCHASED", 301, 60) -- partial fill: the event's quantity wins
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].sentAt, 1050)
+	assertEq(own.mailPending[1].items[301].total, 60)
+	assertEq(own.mailPending[1].items[301].groups[0].count, 60) -- commodities: the ilvl-0 group
+	assertTrue(own.mailPending[1].items[301].link ~= nil, "best-effort representative link stored")
+	assertEq(ns.Get(301).sources, { mail = 60 })
+	-- The commit consumed the intent: a duplicate event credits nothing more, and
+	-- neither do the other finalization signals landing after it.
+	S.fire("COMMODITY_PURCHASED", 301, 60)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 60)
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].items[301].total, 60)
+end)
+
+test("commodity_credit_commit_on_succeeded", function()
+	-- COMMODITY_PURCHASED has no consumers in Blizzard's 12.1 client and never showed
+	-- in an in-game trace: COMMODITY_PURCHASE_SUCCEEDED (which Blizzard's own dialog
+	-- waits on) is the working commit signal, crediting the REQUESTED quantity.
+	local ns, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 20)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].items[301].total, 20)
+	assertEq(ns.Get(301).sources, { mail = 20 })
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED") -- consumed: a duplicate commits nothing
+	assertEq(#own.mailPending, 1)
+end)
+
+test("commodity_won_refines_before_and_after_commit", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	local function pending() return _G.ExactItemCountDB.chars[H.OWN].mailPending end
+	S.fire("AUCTION_HOUSE_SHOW")
+	-- Toast BEFORE the commit: the actual fill rides the slot into the commit.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 100)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 60)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(pending()[1].items[301].total, 60)
+	-- Toast AFTER the commit: the committed batch shrinks in place -- downward only,
+	-- and repeats / larger / junk quantities are all no-ops.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 100)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(pending()[2].items[301].total, 100)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 80)
+	assertEq(pending()[2].items[301].total, 80)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 80)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 90)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 0)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", "junk")
+	assertEq(pending()[2].items[301].total, 80)
+	-- A toast bigger than the REQUEST while a slot is pending proves foreignness (a
+	-- fill can't exceed its request): ignored, the request commits untouched.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 10)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 11)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(pending()[3].items[301].total, 10)
+	-- A stray FAILED after a commit retracts nothing, and the committed reference
+	-- survives it -- a late fill report can still shrink the batch.
+	S.fire("COMMODITY_PURCHASE_FAILED")
+	assertEq(#pending(), 3)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 4)
+	assertEq(pending()[3].items[301].total, 4)
+end)
+
+test("commodity_signal_order_permutations", function()
+	-- One purchase (request 100, actual fill 60), every arrival order of the three
+	-- finalization signals: exactly one batch, and the final quantity converges on
+	-- the actual fill whenever a quantity-bearing signal was seen.
+	local orders = {
+		{ "P", "S", "W" }, { "P", "W", "S" }, { "S", "P", "W" },
+		{ "S", "W", "P" }, { "W", "S", "P" }, { "W", "P", "S" },
+	}
+	for _, order in ipairs(orders) do
+		local _, S = loadAddon({ setup = function(S)
+			S.defineItem(301, { name = "Acorn" })
+		end })
+		S.fire("AUCTION_HOUSE_SHOW")
+		_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 100)
+		for _, sig in ipairs(order) do
+			if sig == "P" then
+				S.fire("COMMODITY_PURCHASED", 301, 60)
+			elseif sig == "S" then
+				S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+			else
+				S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 60)
+			end
+		end
+		local label = table.concat(order, ",")
+		local pending = _G.ExactItemCountDB.chars[H.OWN].mailPending
+		assertEq(#pending, 1, "one batch under order " .. label)
+		assertEq(pending[1].items[301].total, 60, "actual fill under order " .. label)
+	end
+end)
+
+test("commodity_back_to_back_same_item_no_phantom", function()
+	-- The steal hazard the refiner design exists for: purchase A commits, purchase B
+	-- of the SAME item starts, then A's won-toast straggles in. It must neither
+	-- commit against B's slot (B hasn't finalized -- a phantom if B then fails) nor
+	-- touch anything else.
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	local function pending() return _G.ExactItemCountDB.chars[H.OWN].mailPending end
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 100)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(#pending(), 1)
+	-- B starts (Start wipes the committed reference; Confirm stashes B's intent).
+	_G.C_AuctionHouse.StartCommoditiesPurchase(301, 50, 77)
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 50)
+	-- A's straggler toast: 80 exceeds B's request -> ignored entirely.
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 80)
+	-- Branch 1: B fails -> still exactly one batch, untouched.
+	S.fire("COMMODITY_PURCHASE_FAILED")
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(#pending(), 1)
+	assertEq(pending()[1].items[301].total, 100)
+	-- Branch 2: a fresh B succeeds -> two correct batches.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 50)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(#pending(), 2)
+	assertEq(pending()[2].items[301].total, 50)
+end)
+
+test("commodity_tier_name_collision_undercount_only", function()
+	-- Quality tiers are distinct itemIDs sharing one display name, so the toast's
+	-- name cannot distinguish them. The refiner may cross-talk between back-to-back
+	-- tier purchases -- accepted because every path is downward: the counts can
+	-- undercount until the inbox scan, never overcount.
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn", reagent = 1 })
+		S.defineItem(302, { name = "Acorn", reagent = 2 })
+	end })
+	local function pending() return _G.ExactItemCountDB.chars[H.OWN].mailPending end
+	S.fire("AUCTION_HOUSE_SHOW")
+	-- Committed tier-2 batch; a tier-1 toast (same name, smaller qty) wrongly shrinks
+	-- it -- undercount, tolerated.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(302, 100)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 30)
+	assertEq(pending()[1].items[302].total, 30)
+	-- Slot path: a pending tier-1 purchase accepts a same-name toast's quantity --
+	-- the commit clamps to min(request, toast), again undercount at worst.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 50)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 20)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(pending()[2].items[301].total, 20)
+	-- Nothing anywhere grew: 100 -> 30 and 50 -> 20 only ever shrank.
+end)
+
+test("commodity_won_unresolved_name_permissive_stash_skipped_adjust", function()
+	-- An item the cache can't resolve (GetItemInfo nil): the slot stash stays
+	-- permissive (the slot's itemID is the real gate), but the post-commit adjust
+	-- requires a POSITIVE name match and is skipped.
+	local _, S = loadAddon() -- itemID 999 deliberately never defined
+	local function pending() return _G.ExactItemCountDB.chars[H.OWN].mailPending end
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(999, 40)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Whatever", 25)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(pending()[1].items[999].total, 25)
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Whatever", 10)
+	assertEq(pending()[1].items[999].total, 25) -- adjust skipped: name can't confirm
+end)
+
+test("commodity_credit_demoted_slot_commits", function()
+	-- Blizzard's BuyDialog hides on success and its OnHide calls
+	-- CancelCommoditiesPurchase; after a mid-session /reload Blizzard's frames receive
+	-- events first, so that cancel can land BEFORE the purchase event reaches this
+	-- addon. The demoted intent must still commit -- exactly once.
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 20)
+	_G.C_AuctionHouse.CancelCommoditiesPurchase() -- the dialog's hide
+	_G.C_AuctionHouse.CancelCommoditiesPurchase() -- a second call must not wipe the slot
+	S.fire("COMMODITY_PURCHASED", 301, 20)
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].items[301].total, 20)
+	-- The demoted slot must commit through SUCCEEDED too -- on 12.1 that IS the
+	-- signal, and the dialog's hide (-> demote) precedes it in the /reload order.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 8)
+	_G.C_AuctionHouse.CancelCommoditiesPurchase()
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(#own.mailPending, 2)
+	assertEq(own.mailPending[2].items[301].total, 8)
+	-- Starting a NEW quote flow drops whatever unresolved state preceded it.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 5)
+	_G.C_AuctionHouse.StartCommoditiesPurchase(301, 7, 77)
+	S.fire("COMMODITY_PURCHASED", 301, 5)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	assertEq(#own.mailPending, 2)
+end)
+
+test("commodity_credit_guards", function()
+	-- Only a finalized purchase matching a recorded intent may credit.
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		S.defineItem(302, { name = "Birch" })
+	end })
+	local function pending() return _G.ExactItemCountDB.chars[H.OWN].mailPending end
+	S.fire("AUCTION_HOUSE_SHOW")
+	-- No intent in hand: a PURCHASED may be a buyer taking YOUR listing (whether the
+	-- event fires seller-side is unverified -- the gate makes it moot), a SUCCEEDED
+	-- has nothing to describe, and a won-toast with neither slot nor committed batch
+	-- refines nothing.
+	S.fire("COMMODITY_PURCHASED", 301, 10)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	S.fire("AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION", "Acorn", 10)
+	assertEq(pending(), nil)
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 10)
+	-- Wrong item, or a quantity above the request (a fill never exceeds it): not our
+	-- purchase -- and the intent survives for the real resolution.
+	S.fire("COMMODITY_PURCHASED", 302, 10)
+	S.fire("COMMODITY_PURCHASED", 301, 11)
+	assertEq(pending(), nil)
+	S.fire("COMMODITY_PURCHASED", 301, 10)
+	assertEq(pending()[1].items[301].total, 10)
+	-- A failed purchase discards; a later event finds nothing.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 10)
+	S.fire("COMMODITY_PURCHASE_FAILED")
+	S.fire("COMMODITY_PURCHASED", 301, 10)
+	assertEq(#pending(), 1)
+	-- A dead quote discards the demoted slot too.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 10)
+	_G.C_AuctionHouse.CancelCommoditiesPurchase()
+	S.fire("COMMODITY_PRICE_UNAVAILABLE")
+	S.fire("COMMODITY_PURCHASED", 301, 10)
+	assertEq(#pending(), 1)
+	-- AH close discards; a straggler event after close credits nothing.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 10)
+	S.fire("AUCTION_HOUSE_CLOSED")
+	S.fire("COMMODITY_PURCHASED", 301, 10)
+	assertEq(#pending(), 1)
+	-- And with the AH closed, a stray Confirm plants no intent at all.
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 10)
+	S.fire("AUCTION_HOUSE_SHOW")
+	S.fire("COMMODITY_PURCHASED", 301, 10)
+	assertEq(#pending(), 1)
+end)
+
+test("buyout_credit_on_purchase_completed", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	local gearLink = S.link(101, "listing", { ilvl = 658, crafted = 4 })
+	S.auctionsByID[9001] = { itemKey = { itemID = 101, itemLevel = 658 }, itemLink = gearLink }
+	S.auctionsByID[9002] = { itemKey = { itemID = 301 } } -- no itemLevel, no link: the ilvl-0 group
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.PlaceBid(9001, 500000)
+	_G.C_AuctionHouse.PlaceBid(9002, 100)
+	_G.C_AuctionHouse.PlaceBid(9003, 100) -- GetAuctionInfoByID nil: an id-less entry is stashed
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(own.mailPending, nil) -- a bid alone (no completion event) never credits
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 9001)
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].items[101].total, 1) -- item listings are single items
+	assertEq(own.mailPending[1].items[101].groups[658].count, 1)
+	assertEq(own.mailPending[1].items[101].groups[658].link, gearLink)
+	-- A duplicate completion no-ops (the commit consumed the stash entry).
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 9001)
+	assertEq(#own.mailPending, 1)
+	-- 9003's item is still unknown at completion time: the commit-time retry finds
+	-- nothing, commits nothing, and KEEPS the entry -- until the lookup resolves (a
+	-- later completion re-fire then commits) or the AH closes.
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 9003)
+	assertEq(#own.mailPending, 1)
+	S.auctionsByID[9003] = { itemKey = { itemID = 301 } }
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 9003)
+	assertEq(#own.mailPending, 2)
+	assertEq(own.mailPending[2].items[301].total, 1)
+	-- The observed commodity-purchase variant (auctionID 0) and junk payloads are
+	-- inert, and PlaceBid with a non-positive/junk auctionID stashes nothing.
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 0)
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", nil)
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", "junk")
+	_G.C_AuctionHouse.PlaceBid(0, 100)
+	_G.C_AuctionHouse.PlaceBid(nil, 100)
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 0)
+	assertEq(#own.mailPending, 2)
+	-- Close clears the unresolved 9002 stash: its late completion credits nothing.
+	S.fire("AUCTION_HOUSE_CLOSED")
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 9002)
+	assertEq(#own.mailPending, 2)
+end)
+
+test("buyout_won_toast_fallback_commits_idless_entry", function()
+	-- When GetAuctionInfoByID never resolves (its return is fully optional and
+	-- Blizzard only queries it pre-popup), the buyer's "You won an auction for
+	-- [link]" toast is the fallback identifier: strictly keyed by its auctionID to a
+	-- stashed bid, item parsed from the embedded link, qty always 1.
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
+	end })
+	local gearLink = S.link(101, "wontoast", { ilvl = 645, crafted = 3 })
+	local WON = _G.Enum.AuctionHouseNotification.AuctionWon
+	local function pending() return _G.ExactItemCountDB.chars[H.OWN].mailPending end
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.PlaceBid(9001, 500000) -- GetAuctionInfoByID nil -> id-less entry
+	-- Guards: wrong notification kind, nil auctionID, unstashed auctionID, and text
+	-- without a complete item link all commit nothing (the last keeps the entry).
+	S.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", 4, "Sold: " .. gearLink, 9001)
+	S.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", WON, "You won " .. gearLink, nil)
+	S.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", WON, "You won " .. gearLink, 7777)
+	S.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", WON, "You won an auction for Forged Chest", 9001)
+	assertEq(pending(), nil)
+	-- The real toast: link parsed, credit committed, entry consumed.
+	S.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", WON, "You won an auction for " .. gearLink .. ".", 9001)
+	assertEq(#pending(), 1)
+	assertEq(pending()[1].items[101].total, 1)
+	assertEq(pending()[1].items[101].groups[645].count, 1) -- ilvl resolved from the parsed link
+	-- Either order, exactly one credit: a completion landing after the toast no-ops.
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 9001)
+	S.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", WON, "You won an auction for " .. gearLink .. ".", 9001)
+	assertEq(#pending(), 1)
+	-- Reverse order on a fresh bid: completion (with the lookup now resolvable)
+	-- commits first, the toast then finds no entry.
+	S.auctionsByID[9002] = { itemKey = { itemID = 101, itemLevel = 645 }, itemLink = gearLink }
+	_G.C_AuctionHouse.PlaceBid(9002, 400000)
+	S.fire("AUCTION_HOUSE_PURCHASE_COMPLETED", 9002)
+	S.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", WON, "You won an auction for " .. gearLink .. ".", 9002)
+	assertEq(#pending(), 2)
+end)
+
+test("cancel_credit_on_auction_canceled", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	local link = S.link(301, "cancelme")
+	S.ownedAuctions = {
+		{ auctionID = 11, itemKey = { itemID = 301, itemLevel = 0 }, quantity = 40, itemLink = link },
+		{ auctionID = 12, itemKey = { itemID = 301 }, quantity = 5, status = 1 }, -- Sold
+	}
+	S.fire("AUCTION_HOUSE_SHOW")
+	assertEq(S.calls.queryOwned, 1)
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	-- A sold listing can't return items (gold arrives instead): nothing is recorded.
+	_G.C_AuctionHouse.CancelAuction(12)
+	S.fire("AUCTION_CANCELED", 12)
+	assertEq(own.mailPending, nil)
+	-- A cancel event with no CancelAuction call seen commits nothing.
+	S.fire("AUCTION_CANCELED", 11)
+	assertEq(own.mailPending, nil)
+	_G.C_AuctionHouse.CancelAuction(11)
+	S.fire("AUCTION_CANCELED", 11)
+	assertEq(own.mailPending[1].items[301].total, 40)
+	assertEq(own.mailPending[1].items[301].groups[0].link, link)
+	-- The commit nudges the owned-listings rescan so the stale listing drops promptly.
+	assertEq(S.calls.queryOwned, 2)
+	-- The nudged refresh (listing now gone) must not double-commit through the sweep.
+	local full = S.ownedAuctions
+	S.ownedAuctions = { full[2] }
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(#own.mailPending, 1)
+	-- Close clears an unresolved cancel: a straggler event credits nothing.
+	S.ownedAuctions = full
+	_G.C_AuctionHouse.CancelAuction(11) -- re-stash (back in the live list fixture)
+	S.fire("AUCTION_HOUSE_CLOSED")
+	S.fire("AUCTION_CANCELED", 11)
+	assertEq(#own.mailPending, 1)
+end)
+
+test("commodity_cancel_credit_via_owned_refresh", function()
+	-- The in-game reality for STACKABLE listings: AUCTION_CANCELED fires with a junk
+	-- low payload (observed: 1), never the real auctionID -- the commit rides the
+	-- owned-list refresh instead: a stashed cancel whose listing vanished from a
+	-- COMPLETE result set has finalized.
+	local ns, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn", reagent = 2 })
+	end })
+	local link = S.link(301, "stack")
+	S.ownedAuctions = {
+		{ auctionID = 11, itemKey = { itemID = 301, itemLevel = 0 }, quantity = 40, itemLink = link },
+		{ auctionID = 12, itemKey = { itemID = 301 }, quantity = 5 },
+	}
+	S.fire("AUCTION_HOUSE_SHOW")
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	_G.C_AuctionHouse.CancelAuction(11)
+	local queriesBefore = S.calls.queryOwned
+	S.fire("AUCTION_CANCELED", 1) -- junk payload: no keyed commit...
+	assertEq(own.mailPending, nil)
+	assertEq(S.calls.queryOwned, queriesBefore + 1) -- ...but the refresh is nudged
+	-- A refresh where the listing is STILL present proves nothing.
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(own.mailPending, nil)
+	-- A partial or unreadable result set must never imply absence.
+	local without11 = { { auctionID = 12, itemKey = { itemID = 301 }, quantity = 5 } }
+	S.ownedAuctions = without11
+	S.fullOwnedResults = false
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(own.mailPending, nil)
+	S.ownedAuctions = nil
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(own.mailPending, nil)
+	-- The complete refresh without the listing commits the stash -- exactly once.
+	S.ownedAuctions = without11
+	S.fullOwnedResults = true
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].items[301].total, 40)
+	assertEq(own.mailPending[1].items[301].groups[0].link, link)
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(#own.mailPending, 1)
+	-- The credit is mail; the auction scope reflects the fresh snapshot only.
+	assertEq(ns.Get(301).sources, { mail = 40 })
+	assertEq(ns.Get(301, { auctionsOnly = true }).sources, { auctions = 5 })
+end)
+
+test("cancel_sweep_sold_listing_never_commits", function()
+	-- A cancel that raced a sale: the listing stays in the owned list with status
+	-- Sold (sold listings never vanish mid-session -- collection happens at a
+	-- mailbox, unreachable while the AH is open). Presence, whatever the status,
+	-- means no commit; the entry dies at AH close.
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	S.ownedAuctions = {
+		{ auctionID = 11, itemKey = { itemID = 301 }, quantity = 40 },
+	}
+	S.fire("AUCTION_HOUSE_SHOW")
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	_G.C_AuctionHouse.CancelAuction(11)
+	S.fire("AUCTION_CANCELED", 1)
+	S.ownedAuctions = {
+		{ auctionID = 11, itemKey = { itemID = 301 }, quantity = 40, status = 1 },
+	}
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(own.mailPending, nil)
+	S.fire("AUCTION_HOUSE_CLOSED")
+	S.ownedAuctions = {}
+	S.fire("OWNED_AUCTIONS_UPDATED") -- post-close: the flag is down, nothing sweeps
+	assertEq(own.mailPending, nil)
+end)
+
+test("cancel_two_in_flight_each_commits_once", function()
+	local _, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		S.defineItem(302, { name = "Birch" })
+	end })
+	S.ownedAuctions = {
+		{ auctionID = 11, itemKey = { itemID = 301 }, quantity = 40 },
+		{ auctionID = 21, itemKey = { itemID = 302 }, quantity = 7 },
+	}
+	S.fire("AUCTION_HOUSE_SHOW")
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	_G.C_AuctionHouse.CancelAuction(11)
+	_G.C_AuctionHouse.CancelAuction(21)
+	-- The item listing resolves keyed; the commodity one only via the sweep.
+	S.fire("AUCTION_CANCELED", 21)
+	assertEq(#own.mailPending, 1)
+	assertEq(own.mailPending[1].items[302].total, 7)
+	S.ownedAuctions = {}
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(#own.mailPending, 2)
+	assertEq(own.mailPending[2].items[301].total, 40)
+	S.fire("OWNED_AUCTIONS_UPDATED") -- idempotent
+	assertEq(#own.mailPending, 2)
+end)
+
+test("ah_credit_lifecycle_and_scope", function()
+	local DAY = 24 * 60 * 60
+	local ns, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 30)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED") -- the signal that actually fires on 12.1
+	S.fire("AUCTION_HOUSE_CLOSED")
+	local own = _G.ExactItemCountDB.chars[H.OWN]
+	assertEq(ns.Get(301).sources, { mail = 30 })
+	-- The credit is mail, never "On auction": the auction scope stays empty.
+	assertEq(ns.Get(301, { auctionsOnly = true }), nil)
+	-- Every filter combination keeps total == sum of sources, no zeros recorded.
+	H.eachFilter(function(filter)
+		local agg = ns.Get(301, filter)
+		if agg then
+			assertEq(agg.total, H.sumSources(agg.sources))
+			H.assertNoZeros(agg.sources)
+		end
+	end)
+	-- The own next full inbox scan supersedes the credit wholesale -- the AH mail has
+	-- (or hasn't) arrived, and either way the inbox is now the authority.
+	S.setInbox({ { sender = "Auction House", attachments = { { id = 301, count = 30 } } } })
+	S.fire("MAIL_SHOW")
+	S.fire("MAIL_INBOX_UPDATE")
+	assertEq(own.mailPending, nil)
+	assertEq(ns.Get(301).sources, { mail = 30 }) -- the snapshot's number now, not the credit's
+	S.fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", 17)
+	-- A credit nobody supersedes ages out of the reads at the 31-day line.
+	S.fire("AUCTION_HOUSE_SHOW")
+	_G.C_AuctionHouse.ConfirmCommoditiesPurchase(301, 7)
+	S.fire("COMMODITY_PURCHASE_SUCCEEDED")
+	S.fire("AUCTION_HOUSE_CLOSED")
+	assertEq(ns.Get(301).sources, { mail = 37 })
+	S.advance(31 * DAY)
+	assertEq(ns.Get(301).sources, { mail = 30 })
+end)
+
+test("cancel_double_show_never_sums_and_heals", function()
+	local ns, S = loadAddon({ setup = function(S)
+		S.defineItem(301, { name = "Acorn" })
+	end })
+	local link = S.link(301, "listed")
+	S.ownedAuctions = {
+		{ auctionID = 11, itemKey = { itemID = 301, itemLevel = 0 }, quantity = 40, itemLink = link },
+	}
+	S.fire("AUCTION_HOUSE_SHOW")
+	S.fire("OWNED_AUCTIONS_UPDATED") -- the listing lands in the auctions snapshot
+	_G.C_AuctionHouse.CancelAuction(11)
+	S.fire("AUCTION_CANCELED", 11)
+	-- Until a rescan lands, the stack shows in BOTH scopes -- the documented accepted
+	-- staleness -- but the scopes never sum into one number.
+	assertEq(ns.Get(301).sources, { mail = 40 })
+	assertEq(ns.Get(301, { auctionsOnly = true }).sources, { auctions = 40 })
+	-- The nudged rescan heals the auction side; the credit stays until the mailbox.
+	S.ownedAuctions = {}
+	S.fire("OWNED_AUCTIONS_UPDATED")
+	assertEq(ns.Get(301, { auctionsOnly = true }), nil)
+	assertEq(ns.Get(301).sources, { mail = 40 })
 end)
 
 -- ---------------------------------------------------------------- DB lifecycle

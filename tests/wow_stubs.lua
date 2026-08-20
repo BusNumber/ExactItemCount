@@ -49,6 +49,7 @@ local function resetState()
 	M.bankUsable = {}         -- [Enum.BankType.*] = bool (C_Bank.CanUseBank)
 	M.ownedAuctions = nil     -- GetOwnedAuctions result; nil = no result set in hand
 	M.fullOwnedResults = true -- HasFullOwnedAuctionResults (false = partial pages)
+	M.auctionsByID = {}       -- [auctionID] = AuctionInfo for GetAuctionInfoByID
 	M.inbox = {}              -- messages: { sender=, cod=, money=, attachments={stack,...} }
 	M.inboxTotal = nil        -- GetInboxNumItems 2nd return (server total); nil = #M.inbox
 	M.canCheckInbox = true    -- C_Mail.CanCheckInbox (false = server throttle)
@@ -227,6 +228,10 @@ function M.install()
 		ItemClass = { Recipe = 9 },
 		TooltipDataType = { Item = 17 },
 		AuctionStatus = { Active = 0, Sold = 1 },
+		AuctionHouseNotification = { -- live 12.1 values (AuctionHouseEnumsDocumentation)
+			BidPlaced = 0, AuctionRemoved = 1, AuctionWon = 2,
+			AuctionOutbid = 3, AuctionSold = 4, AuctionExpired = 5,
+		},
 		PlayerInteractionType = { MailInfo = 17 }, -- the live client's value
 	}
 	_G.INVSLOT_FIRST_EQUIPPED = 1
@@ -311,6 +316,14 @@ function M.install()
 			local item = M.items[id]
 			return item and item.name or nil -- nil = never seen this session (cold cache)
 		end,
+		GetItemInfo = function(idOrLink)
+			-- (itemName, itemLink, ...) -- only the first two are consumed. A
+			-- defineItem()d id models the warm cache; an unknown one returns nothing,
+			-- like the live API before the item's data has loaded.
+			local id, item = itemFor(idOrLink)
+			if not (id and item) then return nil end
+			return item.name, M.link(id, "info")
+		end,
 		RequestLoadItemDataByID = function(arg)
 			if type(arg) ~= "string" then
 				error("RequestLoadItemDataByID: string expected, got " .. type(arg), 2)
@@ -380,6 +393,17 @@ function M.install()
 		QueryOwnedAuctions = function() M.calls.queryOwned = M.calls.queryOwned + 1 end,
 		GetOwnedAuctions = function() return M.ownedAuctions end,
 		HasFullOwnedAuctionResults = function() return M.fullOwnedResults end,
+		-- AuctionInfo for one browsable listing ({ itemKey, itemLink } -- no quantity
+		-- field in the live struct); fixtures fill M.auctionsByID.
+		GetAuctionInfoByID = function(id) return M.auctionsByID[id] end,
+		-- Purchase/cancel entry points exist only so the production hooksecurefunc
+		-- post-hooks have something to wrap; tests drive a flow by calling them the way
+		-- Blizzard's UI would, then firing the finalization events.
+		StartCommoditiesPurchase = function() end,
+		ConfirmCommoditiesPurchase = function() end,
+		CancelCommoditiesPurchase = function() end,
+		PlaceBid = function() end,
+		CancelAuction = function() end,
 	}
 
 	-- Mail. The stubs encode the exact return shapes the scan relies on -- notably
@@ -431,9 +455,17 @@ function M.install()
 		-- the hostile answer (slots already cleared when post-hooks run).
 		if M.sendSlotsClearOnSend then M.sendSlots = {} end
 	end
-	_G.hooksecurefunc = function(name, fn)
-		local orig = _G[name]
-		_G[name] = function(...)
+	-- Both live signatures: hooksecurefunc(name, fn) wraps _G[name],
+	-- hooksecurefunc(tbl, name, fn) wraps tbl[name] (the C_AuctionHouse hooks).
+	_G.hooksecurefunc = function(a, b, c)
+		local tbl, name, fn
+		if type(a) == "table" then
+			tbl, name, fn = a, b, c
+		else
+			tbl, name, fn = _G, a, b
+		end
+		local orig = tbl[name]
+		tbl[name] = function(...)
 			orig(...)
 			fn(...)
 		end

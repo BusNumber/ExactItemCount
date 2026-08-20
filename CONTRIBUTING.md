@@ -72,6 +72,18 @@ are the DESIGN.md invariants:
   recipient that normalizes to a known character key, commit on success, discard on
   failure/cancel/close, are superseded by that character's next full inbox scan, and
   expire after 31 days; a stranger's COD attachments are excluded;
+- AH purchase and cancel credits land in the own character's `mailPending` only when
+  a finalization event resolves a stashed intent — commodities commit the requested
+  quantity on purchase-succeeded and the won-toast refines it downward (never up)
+  under every signal order, with seller-side, overfill, tier-name-collision and
+  back-to-back-purchase guards; buyouts qty 1 through the id-less-stash /
+  commit-time-retry / toast-link-fallback chain; cancels read from the live owned
+  list with sold listings skipped and commit keyed by the event's auctionID or —
+  the junk commodity payload — through the owned-list-absence sweep, which never
+  acts on partial result sets and never credits a still-present (or Sold) listing;
+  unresolved intents die on failure, dead quotes, and AH close; the demoted slot
+  still commits after Blizzard's dialog-hide cancel; from there the credits follow
+  the send-credit lifecycle and never enter the auction scope;
 - a bank (or owned-auctions result, or a truncated >100-message inbox) that can't
   currently be read in full never wipes its stored snapshot;
 - the settings sanitizer round-trips: persisted `false` survives, junk values reset,
@@ -218,6 +230,54 @@ The reason this addon exists:
       mail stays inside their per-character numbers; *Only while held* updates an open
       tooltip in place, never duplicating the section.
 - [ ] Characters page: each row's age line now includes `mail`.
+
+### Auction purchases & cancels
+
+*Verified in-game 2026-08-19 on 12.1.0 (two rounds): purchases and cancelled listings
+deliver by **mail** (never straight to bags); purchase credits work for both kinds,
+quality tiers included; item-listing cancel credits work keyed; the table-form
+`hooksecurefunc(C_AuctionHouse, …)` hooks fire; `AUCTION_HOUSE_PURCHASE_COMPLETED`
+fires with auctionID **0** for commodity purchases;
+`AUCTION_HOUSE_SHOW_COMMODITY_WON_NOTIFICATION` carries the actual purchased
+quantity; and `AUCTION_CANCELED` fires with a junk payload (**1**) for
+commodity-listing cancels — those now commit via the owned-list-absence sweep.
+Still to verify:*
+
+- [ ] **Commodity-cancel sweep re-test**: cancel a stackable listing — the credit
+      appears under `mail` immediately, before any mailbox visit. Do it once from
+      the **All Auctions** list and once from the **commodity drill-down** row (the
+      two views source their auctionID differently; if the drill-down case fails,
+      the hook's owned-list lookup missed — report it, the whole-list baseline diff
+      is the documented next step).
+
+- [ ] Buy a stack of materials with `/etrace` running **unfiltered** (an
+      "AUCTION_HOUSE" filter hides the `COMMODITY_*` events): note whether
+      `COMMODITY_PURCHASED` fires at all (the addon treats it as dead — its commit
+      path is legacy), and the order of `COMMODITY_PURCHASE_SUCCEEDED` vs the
+      won-toast. With a stack large enough to fill from several sellers, note whether
+      the toast fires once with the total or once per fill (per-fill would make the
+      downward refiner undercount — report it).
+- [ ] Hover the bought item right after purchase: the count shows under `mail`
+      **before any mailbox visit** and the grand total includes it; a partially
+      filled buy settles on the actual amount once the toast lands. Open the mailbox
+      after delivery and collect — the credit is superseded, no double count at any
+      point.
+- [ ] **Item buyout** with `/etrace` unfiltered: the credit appears as `mail` with
+      the listing's ilvl, quantity 1. Note whether it committed straight from
+      `AUCTION_HOUSE_PURCHASE_COMPLETED` (meaning `GetAuctionInfoByID` resolved in
+      the `PlaceBid` hook or at commit time) or needed the
+      `AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION` fallback — and record that event's
+      payload: is the third arg the auctionID, and does the text embed the item
+      link? Place a plain **bid** (not buyout): no credit ever appears.
+- [ ] **Post-/reload dispatch order**: with the AH open, `/reload`, then buy a
+      commodity — exactly ONE credit must appear (Blizzard's BuyDialog cancels on
+      hide even on success; after a reload its frames see events first, and the
+      demoted-slot path must still commit through SUCCEEDED).
+- [ ] Walk-away paths: start a purchase and close the dialog without confirming, let a
+      quote die (`COMMODITY_PRICE_UNAVAILABLE`), and close the AH mid-purchase —
+      nothing is ever credited for any of them.
+- [ ] Cancel a **partially sold** commodity listing: the credited quantity equals what
+      actually returns by mail (note if a large stack returns as several mails).
 
 ### Persistence lifecycle
 
