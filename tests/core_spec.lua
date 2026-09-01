@@ -1730,3 +1730,57 @@ test("parse_upgrade_track_tolerates_missing_format", function()
 	local group = _G.ExactItemCountDB.chars[H.OWN].bags.items[102].groups[613]
 	assertEq(group.track, nil) -- the scan still succeeds, just tracklessly
 end)
+
+-- ------------------------------------------------- chat-search seams
+
+test("collect_itemids_matches_stores_and_respects_filter", function()
+	local ns, S = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(301, { name = "Acorn" })
+		return H.db({
+			chars = {
+				[H.OWN] = H.charStore({
+					bags = H.dbItems({ { id = 301, count = 1, link = S.link(301, "b") } }),
+					bank = H.dbItems({ { id = 302, count = 2, link = S.link(302, "k", { name = "Bark" }) } }),
+					auctions = H.dbItems({ { id = 305, count = 3, link = S.link(305, "a", { name = "Amber" }) } }),
+				}),
+				["Liara-RealmA"] = H.charStore({
+					bags = H.dbItems({ { id = 303, count = 4, link = S.link(303, "L", { name = "Clay" }) } }),
+				}),
+				["Ghost-RealmA"] = H.charStore({
+					bags = H.dbItems({ { id = 304, count = 5, link = S.link(304, "G", { name = "Dust" }) } }),
+				}),
+			},
+		})
+	end })
+	-- nil filter = every owned store; the normal path never visits auction stores.
+	local ids, repLinks = ns.CollectItemIDs(nil)
+	assertEq(ids, { [301] = true, [302] = true, [303] = true, [304] = true })
+	assertEq(repLinks[301], S.link(301, "b"))
+	-- Per-source gating: a filtered-out store contributes no ids.
+	ids = ns.CollectItemIDs({ bags = true, bank = false, alts = true, altEquipped = true })
+	assertEq(ids, { [301] = true, [303] = true, [304] = true })
+	-- hiddenChars drops that alt's ids entirely.
+	ids = ns.CollectItemIDs({ bags = true, alts = true,
+		hiddenChars = { ["Ghost-RealmA"] = true } })
+	assertEq(ids, { [301] = true, [303] = true })
+	-- auctionsOnly flips the visit set: ONLY auction stores, never the owned ones.
+	local aIds, aLinks = ns.CollectItemIDs({ auctionsOnly = true, alts = true })
+	assertEq(aIds, { [305] = true })
+	assertEq(aLinks[305], S.link(305, "a", { name = "Amber" }))
+end)
+
+test("collect_itemids_safe_before_addon_loaded", function()
+	local ns = loadAddon({ noAddonLoaded = true, noPEW = true })
+	local ids, repLinks = ns.CollectItemIDs(nil) -- nil db: empty universe, no error
+	assertEq(next(ids), nil)
+	assertEq(next(repLinks), nil)
+end)
+
+test("itemname_warm_cold_and_missing", function()
+	local ns, S = loadAddon({ noPEW = true })
+	S.defineItem(301, { name = "Acorn" })
+	assertEq(ns.ItemName(301, nil), "Acorn") -- session cache first
+	local coldLink = S.link(999, "x", { name = "Mystery Cache Item" })
+	assertEq(ns.ItemName(999, coldLink), "Mystery Cache Item") -- bracket-name fallback
+	assertEq(ns.ItemName(998, nil), nil) -- neither resolves: no join key
+end)

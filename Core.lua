@@ -759,6 +759,32 @@ local function LinkName(link)
 	return link and link:match("%[(.-)%]")
 end
 
+-- The id universe: every distinct itemID in the visited stores, plus a representative
+-- link per id (first non-nil in visit order; nil when no stored stack carried one --
+-- linkless commodity listings). GetByName's first pass, shared with the chat search's
+-- enumeration -- one body, two callers, so the visit set can never drift (the same rule
+-- that keeps auctionsOnly inside ForEachSourceStore instead of a second iterator).
+-- `filter` is the ForEachSourceStore filter, including auctionsOnly.
+local function CollectIDs(filter)
+	local ids, repLinks = {}, {}
+	ForEachSourceStore(function(items)
+		for id, entry in pairs(items) do
+			ids[id] = true
+			repLinks[id] = repLinks[id] or entry.link
+		end
+	end, filter)
+	return ids, repLinks
+end
+ns.CollectItemIDs = CollectIDs
+
+-- The one name-resolution rule (the quality-sibling join key and the chat search both
+-- use it): the session's item cache first, the stored link's bracket name as the
+-- cold-cache fallback. nil when neither resolves -- such an id can't join any name
+-- match, the accepted failure mode documented in DESIGN.
+function ns.ItemName(id, repLink)
+	return GetItemNameByID(id) or LinkName(repLink)
+end
+
 -- Every owned stack that shares this item's base name -- i.e. its quality siblings.
 -- Quality reagents are distinct itemIDs at the same name (the star is an icon overlay,
 -- not part of the name), and there is no API to map siblings, so name is the join key.
@@ -775,19 +801,13 @@ end
 -- quality sibling (duplicate item names exist across expansions) from inflating the
 -- total, and keeps the total equal to the sum of the rows under every cache state.
 function ns.GetByName(itemID, filter, accept)
-	local ids, repLinks = {}, {}
-	ForEachSourceStore(function(items)
-		for id, entry in pairs(items) do
-			ids[id] = true
-			repLinks[id] = repLinks[id] or entry.link
-		end
-	end, filter)
+	local ids, repLinks = CollectIDs(filter)
 
-	local name = GetItemNameByID(itemID) or LinkName(repLinks[itemID])
+	local name = ns.ItemName(itemID, repLinks[itemID])
 	local members, combined = {}, { total = 0, sources = {} }
 	if name then
 		for id in pairs(ids) do
-			if (GetItemNameByID(id) or LinkName(repLinks[id])) == name
+			if ns.ItemName(id, repLinks[id]) == name
 				and (not accept or accept(id, repLinks[id])) then
 				local agg = ns.Get(id, filter)
 				if agg then

@@ -436,6 +436,74 @@ scans never change with settings.
   popup; never on the current character) that drops the char's cached data via
   `ns.DeleteChar`.
 
+### The `/eic find` chat command
+
+The tooltip answers "how many do I own" only with the item (or a chat link) in hand.
+`/eic find <name or item link>` answers it from nothing but a name — a chat-printed
+search over the same DB, the deliberately lightweight take on the perennial "where is
+my X" search-window ask (a window would be the opposite of light-by-design; this
+command is the honest test of whether one is ever warranted). It is the addon's only
+chat output, printed solely in direct response to a typed command — muteness stays the
+brand otherwise.
+
+- **Grammar**: bare `/eic` (or whitespace) opens the options panel, exactly as before;
+  `/eic find <query>` runs the search (the keyword is case-insensitive); anything else
+  prints a one-line usage. The router in `Settings.lua` forwards every non-empty
+  message wholesale to `ns.ChatCommand` — the settings layer keeps zero chat knowledge.
+- **Exact ask vs. search**: a query containing an item link (the first `|Hitem` link
+  wins) is an *exact ask* — it always prints one answer line, including `: 0` (the
+  zero-total rule's chat twin; the tooltip pipeline classifies the link, so a quality
+  good answers its name-group combined total exactly like its tooltip). Plain text is
+  a *search*: case-insensitive plain substring match (Lua magic characters are
+  literal) against the resolved name — `ns.ItemName`'s cache-then-bracket-name chain —
+  of every itemID in the DB, so only owned or listed items can ever match. A link that
+  fails to resolve degrades to a text search of its bracket name, not a dead end.
+- **Search scope: everything.** The display tri-states exist to fight tooltip
+  clutter, and a typed command is an explicit ask — a `Never`'d bank silently hiding
+  the only copy would be exactly the silent-failure trust-killer a counter must avoid
+  — so find ignores the bank/warband/equipped/mail/alts modes, `altEquipped`,
+  `auctionsMode`, and `altAuctions` alike. The one gate honored is `hiddenChars` (the
+  Characters-page eye): hiding a character is data-level intent, not display gating.
+  Chat output is a snapshot — no modifier gating, no `RefreshData` analogue.
+- **Output**: a header (`Exact Item Count — 3 matches for "hide":`), then one line per
+  match: the stored representative link (clickable — clicking opens the chat-link
+  popup, which already carries the full tooltip section, breakdown rows included), or
+  the plain name when no link was ever stored (linkless commodity entries), then the
+  count and the standard location suffix. Suffix options are fixed for chat, never the
+  tooltip's modifier-gated ones: suffix always on, every alt named (`altsDetail`
+  forced to `"all"` — find *is* the which-alt surface), banks unmerged.
+- **One line per match** means a quality good's whole name-group is one match: the
+  seed id's aggregate joins its tier siblings (the tooltip's own accept predicate),
+  which are then consumed so the group can't print twice. A same-name id *rejected*
+  by the tier predicate — an unrelated cross-expansion namesake, or a cold-cache
+  sibling — stays unconsumed and prints its own disjoint line: all-or-nothing keeps
+  the totals from double-counting, the printed links disambiguate, and a rejected
+  cold sibling still gets the cache-priming request so a later search heals. The id
+  iteration is sorted, so the lowest matched id seeds a group deterministically.
+- **Listings**: the search universe is the owned stores **plus** the auction stores —
+  an item that is 100% listed must still match (owned-only would answer "no matches"
+  while a stack sits on the AH). Per printed line, a dim ` — on auction: N (…)` tail
+  is appended only when non-zero (the tooltip's non-zero-only rule); it is its own
+  scope with its own suffix, never merged into the owned count — which is why an
+  owned `: 0` before a non-zero tail is a legitimate line, and the only way a text
+  match can read zero.
+- **Guardrails**: plain-text queries need at least 2 characters — a single character
+  is never an intentional search, and there is deliberately no letter/number
+  requirement (a punctuation-only query just matches nothing, harmlessly, since the
+  match is a plain substring). Results sort exact full-name match first, then total
+  descending, then name ascending; the top 10 print and the overflow collapses into
+  one `…and N more — try a more specific name.` tail line — the biggest stashes
+  always show and chat never floods. `hideZero` is deliberately irrelevant here (a
+  linked ask's 0 *is* the answer; a text match is never zero-everywhere by
+  construction).
+- **Echo safety**: the query is reduced to pipe-free plain text before matching or
+  echoing (every UI escape stripped, then any surviving pipe; a fully bracketed
+  `[Name]` unwraps), so a pasted or mangled link can't corrupt chat rendering or fake
+  a hyperlink mid-line. `C_StringUtil.StripHyperlinks` (added 12.0) is the official
+  near-equivalent; the explicit gsub chain stays byte-deterministic for the headless
+  suite. Case folding is `string.lower` — ASCII-only, accepted (the addon is
+  English-only).
+
 ## Architecture
 
 ```
@@ -445,19 +513,19 @@ Manifest. `## SavedVariables: ExactItemCountDB`. Loads Core.lua, Tooltip.lua, Se
 
 ### Core.lua
 
-Data layer: SavedVariables DB + container scans + events + aggregation. Owns `ns.Get`, `ns.GetByName`, `ns.GetCharKey`, `ns.DeleteChar`, plus the shared helpers `ns.IsGearEquipLoc`, `ns.ParseUpgradeTrack`.
+Data layer: SavedVariables DB + container scans + events + aggregation. Owns `ns.Get`, `ns.GetByName`, `ns.CollectItemIDs`, `ns.ItemName`, `ns.GetCharKey`, `ns.DeleteChar`, plus the shared helpers `ns.IsGearEquipLoc`, `ns.ParseUpgradeTrack`.
 
 ### Tooltip.lua
 
-Presentation: TooltipDataProcessor hook + display logic + the MODIFIER_STATE_CHANGED refresh watcher. Reads via the `ns.*` seams only.
+Presentation: TooltipDataProcessor hook + display logic + the MODIFIER_STATE_CHANGED refresh watcher + the `/eic find` chat output (`ns.ChatCommand` — chat is presentation too, and lives here so it reuses the render helpers instead of exporting them). Reads via the `ns.*` seams only.
 
 ### Settings.lua
 
-Settings layer: defaults/sanitizing for `db.settings`, the Options panel (vertical layout + Characters canvas subcategory), `/eic`. Owns `ns.InitSettings`, `ns.GetSettings`.
+Settings layer: defaults/sanitizing for `db.settings`, the Options panel (vertical layout + Characters canvas subcategory), `/eic` (bare opens the panel; any non-empty message routes to `ns.ChatCommand`). Owns `ns.InitSettings`, `ns.GetSettings`.
 
 ### tests/
 
-Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank / auction / truncated-inbox never-wipe, auction-scope isolation (listings leak into no owned number, mail never leaks into the auction scope), the send-credit lifecycle (known-recipient normalization, commit/discard paths, supersede-on-scan, 31-day expiry), the AH purchase/cancel credit lifecycle (intent-gated event commits with the won-toast quantity refiner, converging under every signal order; seller-side, overfill, dead-quote, close-discard and back-to-back-purchase guards; the demoted-cancel slot; the id-less buyout stash with its commit-time retry and toast-link fallback; the commodity-cancel owned-list sweep and its never-on-partial / never-while-present guards), sanitizer round-trips. Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
+Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank / auction / truncated-inbox never-wipe, auction-scope isolation (listings leak into no owned number, mail never leaks into the auction scope), the send-credit lifecycle (known-recipient normalization, commit/discard paths, supersede-on-scan, 31-day expiry), the AH purchase/cancel credit lifecycle (intent-gated event commits with the won-toast quantity refiner, converging under every signal order; seller-side, overfill, dead-quote, close-discard and back-to-back-purchase guards; the demoted-cancel slot; the id-less buyout stash with its commit-time retry and toast-link fallback; the commodity-cancel owned-list sweep and its never-on-partial / never-while-present guards), sanitizer round-trips, and the `/eic find` contract (slash routing, exact-ask vs. search, one-line-per-name-group with disjoint namesake/cold-sibling lines, the tri-states-ignored / hiddenChars-honored scope, the auction tail's separate sum, guardrails, echo sanitizing). Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
 ```
 
 Files share the private addon table via the `local addonName, ns = ...` vararg. **Keep
@@ -569,6 +637,20 @@ buy invalidation bugs.
 - `ns.MergeSources(dst, src)` → sums one sources table into another (the merge
   `combined` is built with); the renderer reuses it when same-name+same-tier members
   collapse into one row.
+- `ns.CollectItemIDs(filter)` → `(ids, repLinks)`: the id universe across every
+  visited store — `ids[id] = true` plus a representative link per id (first non-nil in
+  visit order; absent for ids whose stored stacks never carried one). It **is**
+  `GetByName`'s first pass, extracted — one body, two callers, so the chat search can
+  never drift from the sibling join's view of the DB. Two tables rather than one
+  `[id] = link-or-true` map: a `true` sentinel would leak a non-string into the
+  string-typed link consumers (`ItemName`, the quality lookups). Honors the same
+  `filter`, `auctionsOnly` included.
+- `ns.ItemName(id, repLink)` → the display name or nil: `C_Item.GetItemNameByID`
+  first (the session cache), the link's bracket name as the cold-cache fallback — the
+  one name-resolution rule, shared by the sibling join and the chat search so the two
+  can never disagree on what an id is called.
+- `ns.ChatCommand(msg)` (presentation layer, `Tooltip.lua`) → handles every non-empty
+  `/eic` message; see [The `/eic find` chat command](#the-eic-find-chat-command).
 - `filter` (optional, nil = everything):
   `{ bags/bank/equipped/mail/warband/alts = bool, altEquipped = bool,
   hiddenChars = { [fullKey] = true } }`, applied inside `ForEachSourceStore` — the one

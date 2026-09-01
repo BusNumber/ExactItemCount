@@ -5,6 +5,15 @@ All notable changes to Exact Item Count are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-31
+
+### Added
+
+- **Item search in chat**: `/eic find <name or item link>` looks up your counts without
+  hovering anything. Type part of a name (or shift-click an item into the command) and
+  every match prints with its full where-is-it breakdown, every alt named, plus a
+  separate `on auction` count when you have listings.
+
 ## [1.5.0] - 2026-08-19
 
 ### Added
@@ -121,6 +130,7 @@ Initial public release. For **Midnight, patch 12.0.5** (retail).
 - **Live tooltip refresh** — holding or releasing the modifier key over an open tooltip
   updates the counts in place.
 
+[1.6.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.6.0
 [1.5.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.5.0
 [1.4.1]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.4.1
 [1.4.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.4.0

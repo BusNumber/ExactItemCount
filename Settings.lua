@@ -449,8 +449,15 @@ end
 
 SLASH_EXACTITEMCOUNT1 = "/eic"
 SLASH_EXACTITEMCOUNT2 = "/exactitemcount"
-SlashCmdList.EXACTITEMCOUNT = function()
-	if categoryID then
+-- Bare /eic opens the panel; anything else routes wholesale to the presentation
+-- layer's command handler (Tooltip.lua) -- the settings layer keeps zero chat
+-- knowledge. The presence check fails open to the panel in worlds that load without
+-- Tooltip.lua (the test suite's file-override option).
+SlashCmdList.EXACTITEMCOUNT = function(msg)
+	local trimmed = type(msg) == "string" and msg:match("^%s*(.-)%s*$") or ""
+	if trimmed ~= "" and ns.ChatCommand then
+		ns.ChatCommand(trimmed)
+	elseif categoryID then
 		Settings.OpenToCategory(categoryID)
 	end
 end

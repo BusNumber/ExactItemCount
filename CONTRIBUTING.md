@@ -87,7 +87,14 @@ are the DESIGN.md invariants:
 - a bank (or owned-auctions result, or a truncated >100-message inbox) that can't
   currently be read in full never wipes its stored snapshot;
 - the settings sanitizer round-trips: persisted `false` survives, junk values reset,
-  and a DB-version rebuild carries `settings` over.
+  and a DB-version rebuild carries `settings` over;
+- the `/eic find` chat command: bare `/eic` still opens the panel; a linked item is an
+  exact ask (answered even at 0) while text is a substring search over owned + listed
+  items only; a quality good's name-group prints once with namesakes and cold siblings
+  on their own disjoint lines; the search ignores the display tri-states but honors
+  hidden characters; the `on auction` tail sums separately and appears only when
+  non-zero; the length floor, result cap, sort order, and pipe-stripping of the echoed
+  query all hold.
 
 The rule of thumb: **when you add or change data-layer or display behavior, add a
 test; when a claim needs the real client, add a checklist item below instead.** The
@@ -278,6 +285,30 @@ Still to verify:*
       nothing is ever credited for any of them.
 - [ ] Cancel a **partially sold** commodity listing: the credited quantity equals what
       actually returns by mail (note if a large stack returns as several mails).
+
+### Chat search (`/eic find`)
+
+- [ ] `/eic find <part of a name>` for an item you own at several places: the header,
+      one line per match, counts and location suffixes correct; the printed item link
+      renders **clickable and quality-colored** in the chat frame.
+- [ ] **Click a printed result link**: the chat-link popup (ItemRefTooltip) opens and
+      carries the addon's full tooltip section — breakdown rows included. This is the
+      payoff of printing links; confirm it works for a reagent (tier rows) and a
+      crafted piece (ilvl rows).
+- [ ] Type `/eic find ` in the chat box, then **shift-click an item** in your bags:
+      the link is inserted into the edit box; sending it answers with that exact
+      item's line (a `: 0` answer for something you don't own is correct, not a bug).
+- [ ] With 10+ alts owning the searched item, the every-alt-named suffix line stays
+      readable in the chat frame (it wraps, but must stay legible).
+- [ ] `/eic` alone still opens the options panel; `/eic wat` prints the usage line.
+- [ ] Set Bank to *Never*, search an item that's mostly in the bank: find still counts
+      it (deliberately different from the tooltip under the same setting) while the
+      tooltip keeps excluding it.
+- [ ] Search a stackable material you have **listed on the AH but own none of**: it
+      appears as `: 0 — on auction: N`. (Commodity listings store no link, so a plain
+      white name instead of a clickable link is expected there.)
+- [ ] Hide a character on the Characters page: its counts drop out of find results
+      immediately.
 
 ### Persistence lifecycle
 

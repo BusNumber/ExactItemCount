@@ -35,6 +35,7 @@ read_globals = {
 	"CreateAtlasMarkup",
 	"CreateFrame",
 	"CreateSettingsListSectionHeaderInitializer",
+	"DEFAULT_CHAT_FRAME",
 	"Enum",
 	"GameTooltip",
 	"GameTooltip_Hide",

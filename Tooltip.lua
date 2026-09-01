@@ -543,6 +543,192 @@ end
 
 TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, OnItemTooltip)
 
+-- ---------------------------------------------------------------------------
+-- The `/eic find <name or item link>` chat command. Chat output is presentation, so it
+-- lives here with the tooltip's render helpers (SourceSuffix, ComputeAggregate, the
+-- palette, the requestedLoad priming state) rather than exporting them; Settings.lua's
+-- slash handler routes every non-empty message to ns.ChatCommand and keeps zero chat
+-- knowledge. Output is a snapshot -- no RefreshData analogue exists for chat lines.
+
+local FIND_MIN_QUERY = 2    -- a single character is never an intentional search; the
+                            -- result cap below does the real flood-prevention work
+local FIND_MAX_RESULTS = 10 -- overflow collapses into one "...and N more" tail line
+
+local EMDASH = " \226\128\148 " -- scope separator; escaped like the suffix middle dot
+
+-- Fixed display options for every chat suffix, never the tooltip's modifier-gated
+-- ones: find IS the "which alt has it" surface, so every alt is always named and the
+-- suffix always renders. topN is a defensive placeholder (the "all" branch never reads
+-- it); banks stay separate -- the fuller vocabulary for an explicit ask.
+local CHAT_OPTS = { showSuffix = true, mergeBanks = false, altsDetail = "all", topN = 0 }
+
+local function Chat(text)
+	DEFAULT_CHAT_FRAME:AddMessage(text)
+end
+
+local function ChatHeader(text)
+	return C(ACCENT, "Exact Item Count" .. EMDASH .. text)
+end
+
+-- find searches EVERYTHING: the display tri-states exist to fight tooltip clutter, and
+-- a typed command is an explicit ask -- a "Never"ed bank silently hiding the only copy
+-- would turn the search into the silent-failure trust-killer this addon avoids. Only
+-- hiddenChars (the Characters-page eye) applies: hiding a character is data-level
+-- intent, not display gating. The auction scope gets the same treatment (alts' listings
+-- included, auctionsMode/altAuctions ignored) for the same reason.
+local function ChatFilters()
+	local s = ns.GetSettings and ns.GetSettings()
+	local hidden = s and s.hiddenChars or nil
+	return {
+		bags = true, bank = true, equipped = true, mail = true, warband = true,
+		alts = true, altEquipped = true, hiddenChars = hidden,
+	}, { auctionsOnly = true, alts = true, hiddenChars = hidden }
+end
+
+-- Reduces a raw query to plain, pipe-free text: every UI escape is stripped (a pasted
+-- link that failed to resolve degrades to its bracket name), then any surviving pipe,
+-- so echoing the query back can't open a color region or fake a hyperlink mid-line.
+-- (C_StringUtil.StripHyperlinks, added in 12.0, is the official near-equivalent; the
+-- explicit chain stays byte-deterministic and headless-testable.) A fully bracketed
+-- query unwraps so a pasted "[Name]" searches "Name".
+local function SanitizeQuery(text)
+	text = text
+		:gsub("|c%x%x%x%x%x%x%x%x", "")
+		:gsub("|r", "")
+		:gsub("|H.-|h", "")
+		:gsub("|h", "")
+		:gsub("|T.-|t", "")
+		:gsub("|A.-|a", "")
+		:gsub("|n", " ")
+		:gsub("|", "")
+	text = text:match("^%s*(.-)%s*$")
+	return text:match("^%[(.*)%]$") or text
+end
+
+-- The listings scope for one result line: appended after the owned suffix, only when
+-- non-zero (zero listings is the norm for nearly every item -- the tooltip's own
+-- non-zero-only rule). A separate count after the em dash: the two scopes never merge
+-- into one number, and a line can legitimately read ": 0" before a non-zero tail (an
+-- item that is 100% listed).
+local function AuctionTail(itemID, repLink, auctionFilter)
+	local agg = ComputeAggregate(itemID, repLink, auctionFilter)
+	if agg.total == 0 then return "" end
+	return C(DIM, EMDASH .. "on auction: ") .. C(WHITE, tostring(agg.total))
+		.. LeadSuffix(agg, CHAT_OPTS)
+end
+
+local function PrintUsage()
+	Chat(ChatHeader("/eic opens options \194\183 /eic find <name or item link> searches your counts"))
+end
+
+local function RunFind(rawQuery)
+	local ownedFilter, auctionFilter = ChatFilters()
+
+	-- A pasted item link is an exact ask, so it always gets one answer line -- a 0 is
+	-- the answer (the zero-total tooltip rule's chat twin); no guardrails apply. The
+	-- aggregate is the hovered path's own: a quality good answers its name-group
+	-- combined total, exactly like its tooltip.
+	local link = rawQuery:match("|Hitem:.-|h%[.-%]|h")
+	local linkID = link and GetItemInfoInstant(link)
+	if linkID then
+		local agg = ComputeAggregate(linkID, link, ownedFilter)
+		Chat(ChatHeader("") .. link .. C(WHITE, ": " .. tostring(agg.total))
+			.. LeadSuffix(agg, CHAT_OPTS) .. AuctionTail(linkID, link, auctionFilter))
+		return
+	end
+
+	local q = SanitizeQuery(rawQuery)
+	if #q < FIND_MIN_QUERY then
+		Chat(ChatHeader("type at least " .. FIND_MIN_QUERY
+			.. " characters, or shift-click an item link."))
+		return
+	end
+	local needle = q:lower() -- ASCII-only folding; accepted, the addon is English-only
+
+	-- The id universe: every owned store PLUS the auction stores -- an item that is
+	-- 100% listed must still match (owned-only would answer "no matches" while a stack
+	-- sits on the AH). Owned representatives win; auction-only ids may carry a nil
+	-- commodity link and then resolve by cached name or not at all (the same accepted
+	-- failure mode the sibling join has).
+	local ids, repLinks = ns.CollectItemIDs(ownedFilter)
+	local aIds, aLinks = ns.CollectItemIDs(auctionFilter)
+	for id in pairs(aIds) do
+		ids[id] = true
+		if repLinks[id] == nil then repLinks[id] = aLinks[id] end
+	end
+
+	-- pairs() order is undefined: sort the universe so the lowest matched id seeds a
+	-- quality name-group deterministically (stable output, stable tests).
+	local sorted = {}
+	for id in pairs(ids) do
+		sorted[#sorted + 1] = id
+	end
+	table.sort(sorted)
+
+	-- One line per match, where a quality good's whole name-group is ONE match: the
+	-- seed's aggregate joins its siblings, which are then consumed so the group can't
+	-- print twice. Consumption comes from agg.members -- the accepted set -- so an
+	-- unrelated namesake or a cold-cache sibling rejected by the tier predicate stays
+	-- unconsumed and prints its own disjoint line (the all-or-nothing rule keeps the
+	-- totals from double-counting; the printed links disambiguate).
+	local consumed, results = {}, {}
+	for _, id in ipairs(sorted) do
+		if not consumed[id] then
+			local name = ns.ItemName(id, repLinks[id])
+			if name and name:lower():find(needle, 1, true) then
+				local agg = ComputeAggregate(id, repLinks[id], ownedFilter)
+				if agg.tier then
+					consumed[id] = true
+					for _, member in ipairs(agg.members) do
+						consumed[member.itemID] = true
+					end
+				end
+				results[#results + 1] = {
+					id = id, name = name, link = repLinks[id], agg = agg,
+					exact = name:lower() == needle,
+				}
+			end
+		end
+	end
+
+	local found = #results
+	if found == 0 then
+		Chat(ChatHeader('no matches for "' .. q .. '" in your scanned items.'))
+		return
+	end
+	table.sort(results, function(a, b)
+		if a.exact ~= b.exact then return a.exact end
+		if a.agg.total ~= b.agg.total then return a.agg.total > b.agg.total end
+		if a.name ~= b.name then return a.name < b.name end
+		return a.id < b.id -- namesakes: deterministic order
+	end)
+
+	Chat(ChatHeader(found .. (found == 1 and " match" or " matches")
+		.. ' for "' .. q .. '":'))
+	for i = 1, math.min(found, FIND_MAX_RESULTS) do
+		local r = results[i]
+		-- A stored link renders itself (clickable, quality-colored -- never wrap it in
+		-- C()); a linkless entry falls back to the plain name.
+		Chat("  " .. (r.link or C(WHITE, r.name)) .. C(WHITE, ": " .. tostring(r.agg.total))
+			.. LeadSuffix(r.agg, CHAT_OPTS) .. AuctionTail(r.id, repLinks[r.id], auctionFilter))
+	end
+	if found > FIND_MAX_RESULTS then
+		Chat("  " .. C(DIM, "\226\128\166and " .. (found - FIND_MAX_RESULTS)
+			.. " more" .. EMDASH .. "try a more specific name."))
+	end
+end
+
+-- The slash router's seam: every non-empty /eic message lands here (Settings.lua owns
+-- only the empty-message panel-open). Unknown subcommands get the usage line.
+function ns.ChatCommand(msg)
+	local cmd, rest = msg:match("^(%S+)%s*(.-)%s*$")
+	if cmd and cmd:lower() == "find" and rest ~= "" then
+		RunFind(rest)
+	else
+		PrintUsage()
+	end
+end
+
 -- Live update for the "[modifier] held" settings: when the configured key flips while a
 -- tooltip is up, RefreshData() re-runs the stored tooltip info through the full
 -- processing pipeline -- including the post-call above, which re-reads the key state.

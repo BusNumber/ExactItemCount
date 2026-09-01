@@ -58,7 +58,8 @@ local function resetState()
 	                          -- modeling "slots unreadable inside a post-hook"
 	M.displayedLink = nil     -- TooltipUtil.GetDisplayedItem fallback result
 	M.calls = { bagTip = 0, invTip = 0, inboxTip = 0, sendTip = 0,
-		queryOwned = 0, checkInbox = 0, requestLoad = {} }
+		queryOwned = 0, checkInbox = 0, requestLoad = {}, openToCategory = 0 }
+	M.chatLines = {}          -- DEFAULT_CHAT_FRAME:AddMessage captures (chat output)
 	M.settingsRegistry = {}   -- [variable] = capture from Settings.Register*Setting
 	M.valueChangedCallbacks = {}
 	M.itemPostCall = nil      -- the tooltip post-call Tooltip.lua registered (test entry point)
@@ -518,11 +519,20 @@ function M.install()
 		SetOnValueChangedCallback = function(variable, cb)
 			M.valueChangedCallbacks[variable] = cb
 		end,
+		-- Explicit so tests can assert the slash handler opened the panel: the magic
+		-- __index would otherwise absorb this into an unrecordable no-op.
+		OpenToCategory = function()
+			M.calls.openToCategory = M.calls.openToCategory + 1
+		end,
 	}, widgetMeta)
 	_G.CreateSettingsListSectionHeaderInitializer = function(text) return { header = text } end
 	_G.MinimalSliderWithSteppersMixin = { Label = { Right = 4 } }
 	_G.StaticPopupDialogs = {}
 	_G.SlashCmdList = {}
+	-- Chat sink: text only (the live signature's trailing r,g,b args are unused).
+	_G.DEFAULT_CHAT_FRAME = {
+		AddMessage = function(_, text) M.chatLines[#M.chatLines + 1] = text end,
+	}
 	_G.StaticPopup_Show = function() end
 	_G.GameTooltip_Hide = function() end
 	_G.DELETE = "Delete"

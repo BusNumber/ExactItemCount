@@ -208,7 +208,30 @@ function H.assertSectionInvariant(tip)
 	return (H.parseLine(leads[1]))
 end
 
--- DB-shape fixture builders (see the schema comment atop Core.lua).
+-- Chat lines carry item links, whose |H...|h scaffolding H.strip leaves behind (tooltip
+-- lines never carried links, so it never had to) -- parseLine would misparse them.
+-- The bracket name survives: "  [Acorn]: 5 (bags 5)".
+function H.stripChat(s)
+	return (H.strip(s):gsub("|H.-|h", ""):gsub("|h", ""))
+end
+
+local FINDDASH = " \226\128\148 " -- the em-dash scope separator find output emits
+
+-- One find output line: split on the em dash and require every scope segment to sum
+-- independently (the owned suffix to the owned count, the "on auction" tail to its own
+-- count) -- the two scopes never merge into one number. Header/usage/tail segments have
+-- no suffix and pass vacuously. Helper-parsing limitation, not a production concern
+-- (production never parses its own output): fixture item names must avoid parentheses,
+-- em dashes, and trailing digits.
+function H.assertFindLine(raw)
+	local s = H.stripChat(raw)
+	for segment in (s .. FINDDASH):gmatch("(.-)" .. FINDDASH) do
+		if segment ~= "" then
+			H.assertSuffixSums(segment)
+		end
+	end
+end
+
 function H.dbItems(stacks)
 	local items = {}
 	for _, s in ipairs(stacks) do
@@ -258,6 +281,27 @@ function H.db(t)
 		warband = t.warband and H.snap(t.warband) or nil,
 		settings = t.settings,
 	}
+end
+
+-- A whole find capture (header first): the header's match count must equal the result
+-- lines plus the "...and N more" tail's N, and every line's scopes must sum. Returns
+-- the header's match count.
+function H.assertFindOutput(lines)
+	local m = tonumber(H.stripChat(lines[1] or ""):match("(%d+) match"))
+	assertTrue(m, "find output must lead with a match-count header")
+	local resultCount, tailN = 0, nil
+	for i = 2, #lines do
+		local more = H.stripChat(lines[i]):match("and (%d+) more")
+		if more then
+			tailN = tonumber(more)
+		else
+			resultCount = resultCount + 1
+		end
+		H.assertFindLine(lines[i])
+	end
+	assertEq(resultCount + (tailN or 0), m,
+		"result lines + overflow tail must equal the header's match count")
+	return m
 end
 
 -- Iterates the 64 display-filter combinations (bags is always true -- no setting).
@@ -325,7 +369,7 @@ local T = {
 	H = H,
 }
 
-for _, spec in ipairs({ "core_spec.lua", "settings_spec.lua", "tooltip_spec.lua" }) do
+for _, spec in ipairs({ "core_spec.lua", "settings_spec.lua", "tooltip_spec.lua", "find_spec.lua" }) do
 	assert(loadfile(here .. spec))(T)
 end
 

@@ -83,6 +83,19 @@ Total items owned: 5 (bags 1 · warband 3 · Liara 1)
 
 If you own none anywhere, the section collapses to `Total items owned: 0`. And if you have a small army of alts, the long tail of names collapses into a single `+4 alts 22`.
 
+**Search from chat** — no item in hand? `/eic find <name>` searches everything the
+addon has scanned and prints the matches with the same where-is-it breakdown (every alt
+named). Type part of a name, or shift-click an item link into the command for an exact
+answer. Results are clickable — click one for the full tooltip breakdown. Your auction
+listings show as a separate `on auction` count after the owned one, same rule as on
+tooltips:
+
+```
+Exact Item Count — 2 matches for "hide":
+  [Stormhide]: 9 (bags 4 · bank 2 · Liara 3) — on auction: 7 (yours 5 · Liara 2)
+  [Stormhide Boots]: 1 (bags 1)
+```
+
 ## Installation
 
 **Manual:**
@@ -94,7 +107,7 @@ If you own none anywhere, the section collapses to `Total items owned: 0`. And i
 3. The folder name must be **`ExactItemCount`** (it has to match `ExactItemCount.toc`).
 4. Restart WoW, or `/reload` if it's running. Make sure **Exact Item Count** is enabled in the AddOns list on the character-select screen.
 
-That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle each location — bank, warband bank, equipped items, mail, other characters, the `On auction` section (always / only while a modifier key is held / never), plus checkboxes for whether to count your alts' equipped gear and whether to include their auction listings; compact-tooltip modes, including whether recipe tooltips count the crafted item (always / only while the key is held / never); and a list of your scanned characters with per-character hide and delete.
+That's it. Options live under **Options → AddOns → Exact Item Count** (or `/eic`): toggle each location — bank, warband bank, equipped items, mail, other characters, the `On auction` section (always / only while a modifier key is held / never), plus checkboxes for whether to count your alts' equipped gear and whether to include their auction listings; compact-tooltip modes, including whether recipe tooltips count the crafted item (always / only while the key is held / never); and a list of your scanned characters with per-character hide and delete. The same command doubles as the chat search: `/eic find <name or item link>`.
 
 ## Scope (current version)
 
@@ -109,6 +122,7 @@ That's it. Options live under **Options → AddOns → Exact Item Count** (or `/
   items sent to your own characters (counted under the recipient), and your auction
   house purchases and cancelled listings (counted as your mail) — until collected
 - ✅ Where-it-is breakdown on every count
+- ✅ Chat search — `/eic find <name or item link>` looks anything up without hovering it
 - ✅ Settings (display-only filtering — what's counted on screen, never what's cached)
 - ⬜ Amount of gold *(planned)*
 
