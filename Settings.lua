@@ -1,5 +1,7 @@
 local addonName, ns = ...
 
+local L = ns.L -- the string table (Locales/): every label and tooltip below comes from it
+
 -- Settings layer: the Options -> AddOns panel plus the seams the other layers read.
 -- Every setting is display-only -- scans and the cached DB never change shape with them,
 -- so the data stays complete and any choice is instantly reversible. Values are
@@ -40,6 +42,8 @@ local DEFAULTS = {
 	bankMerge   = "separate",  -- "separate" | "modifier" (merged unless held) | "merged"
 	hideZero    = false,       -- drop the whole section when the total is 0
 }
+-- One more key lives in the settings table without a default: `locale`, the text
+-- language set explicitly with /eic locale. Absent means "follow the game client".
 
 -- Allowed values per enum setting; anything else in a hand-edited SavedVariables file
 -- degrades to the default instead of surprising the display code.
@@ -68,10 +72,13 @@ function ns.GetSettings()
 	return settings
 end
 
-local MOD_LABELS = { SHIFT = "Shift", ALT = "Alt", CTRL = "Ctrl" }
-
+-- Read at call time, not captured at load: an explicitly chosen text language only
+-- applies once saved settings have loaded, after this file has run.
 local function ModLabel()
-	return MOD_LABELS[settings.modifier] or "Shift"
+	local mod = settings.modifier
+	if mod == "ALT" then return L.KEY_ALT end
+	if mod == "CTRL" then return L.KEY_CTRL end
+	return L.KEY_SHIFT
 end
 
 -- Dropdown option getters run again every time a dropdown opens, so the "[modifier]"
@@ -79,55 +86,54 @@ end
 -- old key name until its dropdown is next opened -- known, accepted staleness.
 local function TriStateOptions()
 	local c = Settings.CreateControlTextContainer()
-	c:Add("always", "Always show")
-	c:Add("modifier", ("Only while %s is held"):format(ModLabel()))
-	c:Add("never", "Never")
+	c:Add("always", L.CHOICE_ALWAYS)
+	c:Add("modifier", L.CHOICE_WHILE_HELD:format(ModLabel()))
+	c:Add("never", L.CHOICE_NEVER)
 	return c:GetData()
 end
 
 local function TwoStateOptions()
 	local c = Settings.CreateControlTextContainer()
-	c:Add("always", "Always show")
-	c:Add("modifier", ("Only while %s is held"):format(ModLabel()))
+	c:Add("always", L.CHOICE_ALWAYS)
+	c:Add("modifier", L.CHOICE_WHILE_HELD:format(ModLabel()))
 	return c:GetData()
 end
 
 local function ModifierOptions()
 	local c = Settings.CreateControlTextContainer()
-	c:Add("SHIFT", "Shift")
-	c:Add("ALT", "Alt")
-	c:Add("CTRL", "Ctrl")
+	c:Add("SHIFT", L.KEY_SHIFT)
+	c:Add("ALT", L.KEY_ALT)
+	c:Add("CTRL", L.KEY_CTRL)
 	return c:GetData()
 end
 
 local function AltsDetailOptions()
 	local c = Settings.CreateControlTextContainer()
-	c:Add("topn", "Top N by count, merge the rest")
-	c:Add("all", "All characters separately")
-	c:Add("total", "Only the total across characters")
+	c:Add("topn", L.CHOICE_ALTS_TOPN)
+	c:Add("all", L.CHOICE_ALTS_ALL)
+	c:Add("total", L.CHOICE_ALTS_TOTAL)
 	return c:GetData()
 end
 
 local function BankMergeOptions()
 	local c = Settings.CreateControlTextContainer()
-	c:Add("separate", "Always separately")
-	c:Add("modifier", ("Merged unless %s is held"):format(ModLabel()))
-	c:Add("merged", "Always merged")
+	c:Add("separate", L.CHOICE_BANKS_SEPARATE)
+	c:Add("modifier", L.CHOICE_BANKS_UNLESS_HELD:format(ModLabel()))
+	c:Add("merged", L.CHOICE_BANKS_MERGED)
 	return c:GetData()
 end
 
 -- "2h ago" / "5d ago" -- coarse m/h/d staleness is enough to judge a hide or a delete.
 local function Ago(ts)
-	if not ts then return "never" end
+	if not ts then return L.AGO_NEVER end
 	local d = time() - ts
-	if d < 60 then return "just now" end
-	if d < 3600 then return math.floor(d / 60) .. "m ago" end
-	if d < 86400 then return math.floor(d / 3600) .. "h ago" end
-	return math.floor(d / 86400) .. "d ago"
+	if d < 60 then return L.AGO_NOW end
+	if d < 3600 then return L.AGO_MINUTES:format(math.floor(d / 60)) end
+	if d < 86400 then return L.AGO_HOURS:format(math.floor(d / 3600)) end
+	return L.AGO_DAYS:format(math.floor(d / 86400))
 end
 
 StaticPopupDialogs["EXACTITEMCOUNT_DELETE_CHAR"] = {
-	text = "Delete stored item counts for %s?",
 	button1 = DELETE,
 	button2 = CANCEL,
 	OnAccept = function(dialog, data)
@@ -138,6 +144,11 @@ StaticPopupDialogs["EXACTITEMCOUNT_DELETE_CHAR"] = {
 	whileDead = true,
 	hideOnEscape = true,
 }
+-- The prompt's text: set now, and again if the text language changes (an explicitly
+-- chosen locale applies only once saved settings load, after this file has run).
+ns.OnLocale(function()
+	StaticPopupDialogs["EXACTITEMCOUNT_DELETE_CHAR"].text = L.POPUP_DELETE_CHAR
+end)
 
 -- The Characters page: one row per scanned character -- full Name-Realm key (the tooltip
 -- merges same-named alts across realms; this list must not), scan age, an eye toggling
@@ -152,15 +163,12 @@ local function BuildCharactersPanel(category)
 
 	local title = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
 	title:SetPoint("TOPLEFT", 10, -10)
-	title:SetText("Characters")
+	title:SetText(L.CHAR_TITLE)
 
 	local hint = frame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
 	hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -6)
 	hint:SetJustifyH("LEFT")
-	hint:SetText("The eye hides a character's items from the counts your other characters"
-		.. " see. A character always counts its own bags and bank, and its data stays"
-		.. " cached. Deleting removes the stored data; a deleted character is scanned"
-		.. " again the next time it logs in with this addon.")
+	hint:SetText(L.CHAR_HINT)
 	frame:SetScript("OnSizeChanged", function(_, width)
 		hint:SetWidth(width - 20)
 	end)
@@ -198,7 +206,7 @@ local function BuildCharactersPanel(category)
 		end)
 		row.del:SetScript("OnEnter", function(self)
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-			GameTooltip:SetText("Delete this character's cached data")
+			GameTooltip:SetText(L.CHAR_DELETE_TIP)
 			GameTooltip:Show()
 		end)
 		row.del:SetScript("OnLeave", GameTooltip_Hide)
@@ -218,14 +226,11 @@ local function BuildCharactersPanel(category)
 		local function ShowEyeTip()
 			GameTooltip:SetOwner(row.eye, "ANCHOR_RIGHT")
 			if settings.hiddenChars[row.key] then
-				GameTooltip:SetText("Hidden from other characters")
-				GameTooltip:AddLine("This character's items are excluded from the counts"
-					.. " your other characters see. Click to include them again.", 1, 1, 1, true)
+				GameTooltip:SetText(L.CHAR_HIDDEN_TITLE)
+				GameTooltip:AddLine(L.CHAR_HIDDEN_TIP, 1, 1, 1, true)
 			else
-				GameTooltip:SetText("Shown on other characters")
-				GameTooltip:AddLine("This character's items count in the tooltips your other"
-					.. " characters see. (A character always counts its own bags and bank.)"
-					.. " Click to hide.", 1, 1, 1, true)
+				GameTooltip:SetText(L.CHAR_SHOWN_TITLE)
+				GameTooltip:AddLine(L.CHAR_SHOWN_TIP, 1, 1, 1, true)
 			end
 			GameTooltip:Show()
 		end
@@ -273,11 +278,12 @@ local function BuildCharactersPanel(category)
 			-- so the disabled rows read at a glance, not only from the eye's tint.
 			row.name:SetFontObject(hidden and "GameFontDisable" or "GameFontHighlight")
 			row.name:SetText(key .. (key == me
-				and (hidden and " |cff4e7a4e(current)|r" or " |cff00ff00(current)|r") or ""))
-			row.age:SetText("bags " .. Ago(char.bags and char.bags.scannedAt)
-				.. " \194\183 bank " .. Ago(char.bank and char.bank.scannedAt)
-				.. " \194\183 mail " .. Ago(char.mail and char.mail.scannedAt)
-				.. " \194\183 auctions " .. Ago(char.auctions and char.auctions.scannedAt))
+				and (" |cff" .. (hidden and "4e7a4e" or "00ff00") .. L.CHAR_CURRENT .. "|r") or ""))
+			row.age:SetText(L.CHAR_AGES:format(
+				Ago(char.bags and char.bags.scannedAt),
+				Ago(char.bank and char.bank.scannedAt),
+				Ago(char.mail and char.mail.scannedAt),
+				Ago(char.auctions and char.auctions.scannedAt)))
 			row.eye:GetNormalTexture():SetDesaturated(hidden)
 			row.eye:SetAlpha(hidden and 0.4 or 1)
 			-- No delete for the current character; with the own key unresolved (panel open
@@ -295,7 +301,7 @@ local function BuildCharactersPanel(category)
 
 	-- The parent's RegisterAddOnCategory covers the subcategory; the settings panel
 	-- anchors and sizes the canvas frame itself.
-	Settings.RegisterCanvasLayoutSubcategory(category, frame, "Characters")
+	Settings.RegisterCanvasLayoutSubcategory(category, frame, L.CHAR_TITLE)
 end
 
 local function RegisterPanel()
@@ -310,37 +316,27 @@ local function RegisterPanel()
 	end
 
 	-- No Bags entry: the current character's bags are always counted.
-	layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Locations"))
-	Settings.CreateDropdown(category, Register("bankMode", "Bank"), TriStateOptions,
-		"Items in this character's bank (snapshot taken while the bank is open).")
-	Settings.CreateDropdown(category, Register("warbandMode", "Warband bank"), TriStateOptions,
-		"Items in the account-wide warband bank (snapshot taken while the bank is open).")
-	local equippedInit = Settings.CreateDropdown(category, Register("equippedMode", "Equipped items"),
-		TriStateOptions,
-		"Items currently equipped on this character (gear plus profession tools and accessories).")
-	local altEquippedInit = Settings.CreateCheckbox(category, Register("altEquipped", "Include in count for alts"),
-		"Also count gear worn by your other characters, folded into each one's total."
-			.. " Uncheck to count only their bags and bank.")
+	layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(L.HEADER_LOCATIONS))
+	Settings.CreateDropdown(category, Register("bankMode", L.OPT_BANK), TriStateOptions,
+		L.OPT_BANK_TIP)
+	Settings.CreateDropdown(category, Register("warbandMode", L.OPT_WARBAND), TriStateOptions,
+		L.OPT_WARBAND_TIP)
+	local equippedInit = Settings.CreateDropdown(category, Register("equippedMode", L.OPT_EQUIPPED),
+		TriStateOptions, L.OPT_EQUIPPED_TIP)
+	local altEquippedInit = Settings.CreateCheckbox(category, Register("altEquipped", L.OPT_ALT_EQUIPPED),
+		L.OPT_ALT_EQUIPPED_TIP)
 	-- Nest under the Equipped dropdown purely for the sub-item margin. The predicate gates
 	-- enabled state; this option governs alts (not this character's own equipped tri-state),
 	-- so it stays enabled regardless -- hence a constant true.
 	altEquippedInit:SetParentInitializer(equippedInit, function() return true end)
-	Settings.CreateDropdown(category, Register("mailMode", "Mail"), TriStateOptions,
-		"Items in this character's mailbox (snapshot taken at the mailbox), plus items it"
-			.. " has mailed to your other characters that haven't been collected yet.")
-	Settings.CreateDropdown(category, Register("altsMode", "Other characters"), TriStateOptions,
-		"Items on every other scanned character, bags and bank combined."
-			.. " Manage individual characters on the Characters page.")
-	local auctionsInit = Settings.CreateDropdown(category, Register("auctionsMode", "On auction"),
-		TriStateOptions,
-		"Items you have listed on the auction house (snapshot taken while the auction"
-			.. " house is open), shown as their own \"On auction\" line. Listings are"
-			.. " never added to the owned total.")
+	Settings.CreateDropdown(category, Register("mailMode", L.OPT_MAIL), TriStateOptions,
+		L.OPT_MAIL_TIP)
+	Settings.CreateDropdown(category, Register("altsMode", L.OPT_ALTS), TriStateOptions,
+		L.OPT_ALTS_TIP)
+	local auctionsInit = Settings.CreateDropdown(category, Register("auctionsMode", L.OPT_AUCTIONS),
+		TriStateOptions, L.OPT_AUCTIONS_TIP)
 	local altAuctionsInit = Settings.CreateCheckbox(category,
-		Register("altAuctions", "Include alts' auctions"),
-		"Also show items your other characters have listed, by name. Their listings are"
-			.. " a snapshot from each character's last auction house visit, so they can"
-			.. " be stale. Follows the Other characters setting above.")
+		Register("altAuctions", L.OPT_ALT_AUCTIONS), L.OPT_ALT_AUCTIONS_TIP)
 	-- Nested under the On auction dropdown for the sub-item margin; unlike the equipped
 	-- checkbox above (which governs a different scope than its parent), this one is a
 	-- strict sub-gate -- with the sub-section on Never it can change nothing -- so the
@@ -349,20 +345,17 @@ local function RegisterPanel()
 		return settings.auctionsMode ~= "never"
 	end)
 
-	layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Compact tooltip"))
-	Settings.CreateDropdown(category, Register("modifier", "Modifier key"), ModifierOptions,
-		"The key the \"only while held\" options wait for. Note that Shift is also the"
-			.. " game's compare-items key, so it flips while comparing gear.")
-	Settings.CreateDropdown(category, Register("suffixMode", "Location suffix"), TwoStateOptions,
-		"The dimmed per-location split after each count, like (bags 2 \194\183 bank 1).")
-	Settings.CreateDropdown(category, Register("rowsMode", "Quality & item level rows"), TwoStateOptions,
-		"The per-rank and per-item-level breakdown rows under the total.")
-	Settings.CreateDropdown(category, Register("recipeProductMode", "Crafted item on recipes"),
-		TriStateOptions,
-		"For recipes, also show the count of the crafted items the recipe is for.")
+	layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(L.HEADER_COMPACT))
+	Settings.CreateDropdown(category, Register("modifier", L.OPT_MODIFIER), ModifierOptions,
+		L.OPT_MODIFIER_TIP)
+	Settings.CreateDropdown(category, Register("suffixMode", L.OPT_SUFFIX), TwoStateOptions,
+		L.OPT_SUFFIX_TIP)
+	Settings.CreateDropdown(category, Register("rowsMode", L.OPT_ROWS), TwoStateOptions,
+		L.OPT_ROWS_TIP)
+	Settings.CreateDropdown(category, Register("recipeProductMode", L.OPT_RECIPE_PRODUCT),
+		TriStateOptions, L.OPT_RECIPE_PRODUCT_TIP)
 	local altsDetailInit = Settings.CreateDropdown(category,
-		Register("altsDetail", "Other characters detail"), AltsDetailOptions,
-		"How other characters appear in the location suffix.")
+		Register("altsDetail", L.OPT_ALTS_DETAIL), AltsDetailOptions, L.OPT_ALTS_DETAIL_TIP)
 	do
 		-- A proxy rather than a plain binding: with "All characters separately" selected
 		-- the box must read as checked (and sit disabled, via the parent predicate below)
@@ -373,13 +366,11 @@ local function RegisterPanel()
 		-- option getters do, so a baked-in "Shift" would go stale on a modifier change.
 		local expandSetting = Settings.RegisterProxySetting(category,
 			addonName .. "_altsExpandKey", Settings.VarType.Boolean,
-			"List all while key is held",
+			L.OPT_ALTS_EXPAND,
 			DEFAULTS.altsExpandKey,
 			function() return settings.altsDetail == "all" or settings.altsExpandKey end,
 			function(value) settings.altsExpandKey = value end)
-		local expandInit = Settings.CreateCheckbox(category, expandSetting,
-			"While the modifier key (set above) is held, every character is listed"
-				.. " separately in the suffix, whatever the detail mode above.")
+		local expandInit = Settings.CreateCheckbox(category, expandSetting, L.OPT_ALTS_EXPAND_TIP)
 		expandInit:SetParentInitializer(altsDetailInit,
 			function() return settings.altsDetail ~= "all" end)
 		Settings.SetOnValueChangedCallback(addonName .. "_altsDetail", function()
@@ -389,17 +380,13 @@ local function RegisterPanel()
 		local sliderOptions = Settings.CreateSliderOptions(1, 10, 1)
 		sliderOptions:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right)
 		local sliderInit = Settings.CreateSlider(category,
-			Register("altsTopN", "Named characters (top N)"),
-			sliderOptions, "With \"Top N by count\" above: how many characters are named"
-				.. " before the rest merge into one \"+K alts\" entry.")
+			Register("altsTopN", L.OPT_ALTS_TOPN), sliderOptions, L.OPT_ALTS_TOPN_TIP)
 		sliderInit:SetParentInitializer(altsDetailInit,
 			function() return settings.altsDetail == "topn" end)
 	end
-	Settings.CreateDropdown(category, Register("bankMerge", "Bank & warband in the suffix"), BankMergeOptions,
-		"Show bank and warband bank as separate suffix entries, or as one combined"
-			.. " \"banks\" entry.")
-	Settings.CreateCheckbox(category, Register("hideZero", "Hide when total is 0"),
-		"Skip the tooltip section entirely for items you own none of.")
+	Settings.CreateDropdown(category, Register("bankMerge", L.OPT_BANK_MERGE), BankMergeOptions,
+		L.OPT_BANK_MERGE_TIP)
+	Settings.CreateCheckbox(category, Register("hideZero", L.OPT_HIDE_ZERO), L.OPT_HIDE_ZERO_TIP)
 
 	-- Footer: support link and version. The URL lives only in the TOC's X-Donate field
 	-- (no field, no line); shown scheme-stripped as plain text -- the game can't open a
@@ -407,10 +394,10 @@ local function RegisterPanel()
 	local donate = C_AddOns.GetAddOnMetadata(addonName, "X-Donate")
 	if donate then
 		layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(
-			"Enjoying the addon? Buy me a coffee: " .. donate:gsub("^https?://", "")))
+			L.FOOTER_DONATE:format((donate:gsub("^https?://", "")))))
 	end
 	layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(
-		"Version " .. (C_AddOns.GetAddOnMetadata(addonName, "Version") or "?")))
+		L.FOOTER_VERSION:format(C_AddOns.GetAddOnMetadata(addonName, "Version") or "?")))
 
 	BuildCharactersPanel(category)
 	Settings.RegisterAddOnCategory(category)
@@ -443,7 +430,15 @@ function ns.InitSettings(database)
 			s.hiddenChars[key] = nil -- the character it hid is gone
 		end
 	end
+	if type(s.locale) ~= "string" or s.locale == "" then s.locale = nil end
 	settings = s
+	-- An explicitly set text language (/eic locale) outranks the client's own. Applied
+	-- BEFORE the panel registers, so its labels -- and everything built later -- read
+	-- the chosen language. A code that is no longer registered is dropped: the text
+	-- falls back to the client's language, then English.
+	if s.locale and not ns.SetLocale(s.locale) then
+		s.locale = nil
+	end
 	RegisterPanel()
 end
 

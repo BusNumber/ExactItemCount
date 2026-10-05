@@ -520,7 +520,7 @@ end)
 test("recipe_product_nil_settings_shows", function()
 	-- No settings layer loaded: the product sub-section defaults to shown, matching the
 	-- "always" default the sanitizer would fill.
-	loadAddon({ noPEW = true, files = { "Core.lua", "Tooltip.lua" }, db = recipeDB })
+	loadAddon({ noPEW = true, without = { ["Settings.lua"] = true }, db = recipeDB })
 	local tip = H.hover({ id = 310, hyperlink = rLink })
 	assertTrue(H.plainLines(tip)[3]:find("Crafted items", 1, true) ~= nil,
 		"nil settings render the product sub-section")
@@ -732,7 +732,7 @@ end)
 test("auction_nil_settings_own_only", function()
 	-- No settings layer loaded: the sub-section defaults to shown, current character
 	-- only -- matching the "always" + unchecked-alts defaults the sanitizer would fill.
-	loadAddon({ noPEW = true, files = { "Core.lua", "Tooltip.lua" }, db = auctionDB })
+	loadAddon({ noPEW = true, without = { ["Settings.lua"] = true }, db = auctionDB })
 	local tip = H.hover({ id = 101, hyperlink = aLink })
 	H.assertSectionInvariant(tip)
 	assertEq(H.plainLines(tip)[4], "On auction: 1")
@@ -1077,7 +1077,7 @@ end)
 test("nil_settings_renders_full_default_display", function()
 	-- Core.lua tolerates a missing settings layer (guarded InitSettings call); the
 	-- tooltip layer must then behave as "no filter, full display, default shape".
-	loadAddon({ noPEW = true, files = { "Core.lua", "Tooltip.lua" }, db = suffixDB })
+	loadAddon({ noPEW = true, without = { ["Settings.lua"] = true }, db = suffixDB })
 	local tip = H.hover({ id = 301 })
 	local count, tokens = H.parseLine(tip.lines[2])
 	assertEq(count, 18)

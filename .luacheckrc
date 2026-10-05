@@ -10,6 +10,10 @@ unused_args = false
 -- even where only `ns` is used.
 ignore = { "211/addonName" }
 
+-- Locale files hold one string per line, however long: a translator (or a translation
+-- tool) needs each value whole, so the line-length limit doesn't apply there.
+files["Locales/*.lua"] = { max_line_length = false }
+
 -- Globals this addon owns or appends to.
 globals = {
 	"ExactItemCountDB",       -- SavedVariable (## SavedVariables in the TOC)
@@ -55,7 +59,8 @@ read_globals = {
 	"IsControlKeyDown",
 	"IsShiftKeyDown",
 
-	-- character / realm
+	-- character / realm / client language
+	"GetLocale",              -- the client's language, read once by Locale.lua
 	"GetNormalizedRealmName",
 	"UnitName",
 

@@ -67,9 +67,10 @@ is in Blizzard's tooltip). One row per ilvl, **highest first**, reading
   track string, and the glyph is simply its first character. On a non-English client the
   letter is therefore that locale's first character, and its uniqueness across tracks is
   **not** guaranteed — a same-first-letter collision between two tracks is possible and
-  accepted. The rest of the addon is English-only; this one badge is deliberately left as a
-  glyph derived from Blizzard's string rather than translated or mapped to English (mapping
-  back would need a per-locale name table, since the English name is never available to us).
+  accepted. The rest of the addon's text comes from its own string table (see
+  [Localization](#localization)); this one badge is deliberately left as a glyph derived
+  from Blizzard's string rather than translated or mapped to English (mapping back would
+  need a per-locale name table, since the English name is never available to us).
   Tracks and crafting ranks never co-occur: crafted gear is recrafted, not upgraded.
 - Trackless plain gear rows read `ilvl X: N`.
 
@@ -442,12 +443,14 @@ The tooltip answers "how many do I own" only with the item (or a chat link) in h
 `/eic find <name or item link>` answers it from nothing but a name — a chat-printed
 search over the same DB, the deliberately lightweight take on the perennial "where is
 my X" search-window ask (a window would be the opposite of light-by-design; this
-command is the honest test of whether one is ever warranted). It is the addon's only
-chat output, printed solely in direct response to a typed command — muteness stays the
-brand otherwise.
+command is the honest test of whether one is ever warranted). With the `/eic locale`
+testing command (see [Localization](#localization)) it is the addon's only chat output,
+both printed solely in direct response to a typed command — muteness stays the brand
+otherwise.
 
 - **Grammar**: bare `/eic` (or whitespace) opens the options panel, exactly as before;
-  `/eic find <query>` runs the search (the keyword is case-insensitive); anything else
+  `/eic find <query>` runs the search (the keyword is case-insensitive); `/eic locale`
+  is the language switch described under [Localization](#localization); anything else
   prints a one-line usage. The router in `Settings.lua` forwards every non-empty
   message wholesale to `ns.ChatCommand` — the settings layer keeps zero chat knowledge.
 - **Exact ask vs. search**: a query containing an item link (the first `|Hitem` link
@@ -501,15 +504,24 @@ brand otherwise.
   `[Name]` unwraps), so a pasted or mangled link can't corrupt chat rendering or fake
   a hyperlink mid-line. `C_StringUtil.StripHyperlinks` (added 12.0) is the official
   near-equivalent; the explicit gsub chain stays byte-deterministic for the headless
-  suite. Case folding is `string.lower` — ASCII-only, accepted (the addon is
-  English-only).
+  suite. Case folding is `string.lower` — ASCII-only, so on a non-English client item
+  names match case-sensitively outside A–Z. Accepted while only English ships; a
+  UTF-8-aware fold belongs with the first translation.
 
 ## Architecture
 
 ```
 ### ExactItemCount.toc
 
-Manifest. `## SavedVariables: ExactItemCountDB`. Loads Core.lua, Tooltip.lua, Settings.lua (order matters).
+Manifest. `## SavedVariables: ExactItemCountDB`. Loads Locale.lua, Locales\enUS.lua, Core.lua, Tooltip.lua, Settings.lua (order matters).
+
+### Locale.lua
+
+String layer, the mechanism: the registry of locale tables and the choice of the active one (explicit choice > client language > enUS). Owns `ns.L` (the lookup every displayed word is read through), `ns.NewLocale`, `ns.SetLocale`, `ns.GetLocaleCode`, `ns.GetLocaleCodes`, `ns.OnLocale`. Loads first. See Localization below.
+
+### Locales/enUS.lua
+
+String layer, the base locale: registers `enUS` and defines every key. A translation is a sibling file registering its own code.
 
 ### Core.lua
 
@@ -525,7 +537,7 @@ Settings layer: defaults/sanitizing for `db.settings`, the Options panel (vertic
 
 ### tests/
 
-Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the three real files against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank / auction / truncated-inbox never-wipe, auction-scope isolation (listings leak into no owned number, mail never leaks into the auction scope), the send-credit lifecycle (known-recipient normalization, commit/discard paths, supersede-on-scan, 31-day expiry), the AH purchase/cancel credit lifecycle (intent-gated event commits with the won-toast quantity refiner, converging under every signal order; seller-side, overfill, dead-quote, close-discard and back-to-back-purchase guards; the demoted-cancel slot; the id-less buyout stash with its commit-time retry and toast-link fallback; the commodity-cancel owned-list sweep and its never-on-partial / never-while-present guards), sanitizer round-trips, and the `/eic find` contract (slash routing, exact-ask vs. search, one-line-per-name-group with disjoint namesake/cold-sibling lines, the tri-states-ignored / hiddenChars-honored scope, the auction tail's separate sum, guardrails, echo sanitizing). Panel UI wiring is stubbed, not asserted; that stays on CONTRIBUTING.md's in-game checklist.
+Headless LuaJIT suite (`luajit tests/run_tests.lua`, run in CI): loads the real files — the TOC's own list, in its order — against the WoW API stubs in `tests/wow_stubs.lua` and asserts this document's invariants — total = sum of rows under every filter, every suffix sums to its row, all-or-nothing sibling membership, bank / auction / truncated-inbox never-wipe, auction-scope isolation (listings leak into no owned number, mail never leaks into the auction scope), the send-credit lifecycle (known-recipient normalization, commit/discard paths, supersede-on-scan, 31-day expiry), the AH purchase/cancel credit lifecycle (intent-gated event commits with the won-toast quantity refiner, converging under every signal order; seller-side, overfill, dead-quote, close-discard and back-to-back-purchase guards; the demoted-cancel slot; the id-less buyout stash with its commit-time retry and toast-link fallback; the commodity-cancel owned-list sweep and its never-on-partial / never-while-present guards), sanitizer round-trips, and the `/eic find` contract (slash routing, exact-ask vs. search, one-line-per-name-group with disjoint namesake/cold-sibling lines, the tri-states-ignored / hiddenChars-honored scope, the auction tail's separate sum, guardrails, echo sanitizing), and the string-table contract (every key the code reads is defined and every defined key is read; a translated table reaches every tooltip line, chat line and panel string with the sum invariants intact; the language shown follows explicit choice > client language > enUS, the choice is saved by `/eic locale` and applied before the panel builds; a translation file may only register its own client code and assign base keys, placeholders preserved). Panel UI wiring is stubbed and its wording unasserted — only that its strings come from the string table; the rest stays on CONTRIBUTING.md's in-game checklist.
 ```
 
 Files share the private addon table via the `local addonName, ns = ...` vararg. **Keep
@@ -570,6 +582,7 @@ ExactItemCountDB = {
     altsDetail = "topn"|"all"|"total", altsTopN = 2,           -- 1..10
     bankMerge = "separate"|"modifier"|"merged",                -- "modifier" = merged UNLESS held
     hiddenChars = { ["Name-NormalizedRealm"] = true },         -- true or absent, never false
+    locale = "<code>",                                         -- absent unless set by /eic locale
   },
 }
 ```
@@ -670,6 +683,76 @@ buy invalidation bugs.
   `ns.GetCharKey()` → current char's full key (nil before PEW); `ns.DeleteChar(key)` →
   drops a char's data + hidden flag, refuses the current char and refuses everything
   while the own key is unresolved.
+
+### Localization
+
+Every word the addon displays lives in one string table, read as `ns.L`. `Locale.lua`
+is the mechanism and `Locales/enUS.lua` the **base locale**: it defines every key and
+is what any client without a translation shows. Only English ships today; the layer
+exists so that a translation is one more file (`Locales/xxXX.lua`) plus one TOC line,
+with no code changes. CONTRIBUTING.md has the translator's steps.
+
+- **Symbolic keys** (`L.LEAD_TOTAL`), not English-phrase keys. Rewording the English
+  never orphans a translation (a phrase key silently falls back to English the moment
+  its source text changes), one English word in two roles stays two strings (`bank %d`
+  the suffix token vs. `Bank` the panel label; `never` the scan age vs. `Never` the
+  dropdown choice), and the panel's sentence-long tooltips stay out of the code. The
+  cost — code no longer shows its own wording inline — is what the base file's
+  grouping comments are for.
+- **Which language is shown**, in priority order: (1) a locale set explicitly, (2) the
+  game client's language when a translation for it is registered, (3) enUS. A string a
+  translation leaves out falls back to English on its own. The explicit choice is the
+  `/eic locale <code>` command — a testing tool, there so a translation can be checked
+  on any client (and English forced on a translated one); `/eic locale default` clears
+  it, and bare `/eic locale` lists the registered codes.
+- **The choice needs a `/reload`, so it is saved.** The options panel's labels are
+  registered once, so a live switch would leave them in the old language while the
+  tooltips moved on. The choice lives in `settings.locale` (absent by default) and is
+  applied at `ADDON_LOADED`, before the panel registers; a saved code that is no longer
+  registered is dropped, never obeyed.
+- **Locale files do not gate themselves on `GetLocale()`.** Saved settings do not exist
+  yet while files load, so a file that skipped itself on the wrong client could never
+  be chosen afterwards. Instead every locale file — enUS included — registers its table
+  with `ns.NewLocale("<code>")`, and `Locale.lua` picks the active one centrally. `ns.L`
+  is a lookup over that choice: the active translation, then enUS, then the key's own
+  name.
+- **Strings handed to the game at file load** — here only the delete prompt's text —
+  are set through `ns.OnLocale`, which runs its callback at once and again whenever the
+  active locale changes, so a saved choice applied later still reaches them. Everything
+  else reads `L` at render time or inside the panel build.
+- **The locale command answers in plain English**, never through the string table: it
+  is the way back from a language you cannot read. While there is nothing to choose
+  between it also stays out of the usage line and the player-facing docs.
+- **Presentation only.** `Tooltip.lua` and `Settings.lua` read `ns.L`; `Core.lua` never
+  touches it. The DB, the source tags (`"bags"`, `"mail"`, …) and the
+  settings enums are language-free and stay that way, so a SavedVariables file means
+  the same thing on every client language.
+- **Format strings, not concatenation**, wherever a word meets a value (`"bags %d"`,
+  `"+%d alts %d"`, `'%d matches for "%s":'`), so a translation can move the number.
+  The game's `string.format` accepts positional arguments (`%2$d`) for reordering;
+  stock Lua does not, so the base locale — the one the headless suite runs — sticks to
+  plain `%s` / `%d`. A counted noun that inflects gets a singular and a plural key
+  picked by `n == 1` (the find header); the client's own plural escape,
+  `|4singular:plural;`, also works inside a value.
+- **Deliberately not in the table**: the *Exact Item Count* name (one name in every
+  language, so screenshots and bug reports stay recognizable), the `/eic` commands
+  with their sub-command words (`find`, `locale`), the punctuation gluing segments
+  together (parentheses, the
+  middle-dot separator, the colon after a label — applied in code, alongside the
+  colors), the upgrade-track badge (already Blizzard's localized string), and
+  character names. The delete popup's buttons are Blizzard's own `DELETE` / `CANCEL`.
+- **A missing key reads back as its own name** (the lookup's last resort), so a typo
+  renders as visible text instead of throwing inside a tooltip post-call, where an
+  error would cost the whole section. The suite, not the fallback, is what keeps typos
+  out: every key the code reads must be defined, and every defined key must be read.
+- **No dynamic lookups**: code reads the table only as `L.KEY`, never `L[expr]`, so
+  that key check can stay a plain scan of the source.
+- **Blizzard's global strings were not swapped in** for any of the addon's own (the
+  popup buttons aside): doing so would change today's English casing and wording, and
+  the suffix tokens are tuned to stay short on one tooltip line. A translation is free
+  to borrow them.
+- The TOC's own text localizes separately, through `## Title-xxXX` / `## Notes-xxXX`
+  lines.
 
 ## WoW API implementation notes (gotchas)
 
@@ -983,5 +1066,6 @@ These plug in behind the existing seams without changing the tooltip layer:
 - Settings polish: formatting / accent-color options; per-container alt detail (at most
   a config-off extra); live re-label of the closed "[modifier] held" dropdowns after a
   modifier change.
-- Localization of the display strings (currently English-only; the upgrade-track
-  parsing side is already locale-safe).
+- Translations: the string layer is in place (see [Localization](#localization)) but
+  only English ships. A language is one `Locales/xxXX.lua` file; a UTF-8-aware case
+  fold for `/eic find` should arrive with the first one.

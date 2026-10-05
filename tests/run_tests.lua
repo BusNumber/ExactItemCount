@@ -1,10 +1,11 @@
 -- tests/run_tests.lua -- headless test suite for Exact Item Count.
 --
--- Loads the REAL Core.lua / Tooltip.lua / Settings.lua against tests/wow_stubs.lua and
--- asserts the DESIGN.md invariants: the grand total equals the sum of the rows under
--- every filter combination, every location suffix sums to its line's count, the settings
--- sanitizer round-trips, bank snapshots are never wiped unreadable, and quality-sibling
--- membership is all-or-nothing. Each test loads a fresh addon world via loadAddon().
+-- Loads the REAL addon files (every file the TOC lists, in TOC order) against
+-- tests/wow_stubs.lua and asserts the DESIGN.md invariants: the grand total equals the
+-- sum of the rows under every filter combination, every location suffix sums to its
+-- line's count, the settings sanitizer round-trips, bank snapshots are never wiped
+-- unreadable, quality-sibling membership is all-or-nothing, and every displayed string
+-- comes out of the string table. Each test loads a fresh addon world via loadAddon().
 --
 -- Usage: luajit tests/run_tests.lua
 -- Anything the stubs cannot model (real panel rendering, atlas art, RefreshData's actual
@@ -71,7 +72,21 @@ end
 
 -- ---------------------------------------------------------------- addon loading
 
-local ADDON_FILES = { "Core.lua", "Tooltip.lua", "Settings.lua" } -- TOC order
+-- The load list is read from the TOC itself, so the suite boots exactly the files -- in
+-- exactly the order -- the game client would. A file that exists on disk but was never
+-- listed there fails here, not in-game. TOC paths conventionally use backslashes.
+local function tocFiles()
+	local files = {}
+	for line in io.lines(root .. "ExactItemCount.toc") do
+		line = line:gsub("\r$", ""):match("^%s*(.-)%s*$")
+		if line ~= "" and line:sub(1, 1) ~= "#" then
+			files[#files + 1] = (line:gsub("\\", "/"))
+		end
+	end
+	return files
+end
+
+local ADDON_FILES = tocFiles()
 
 -- Boots a fresh addon world:
 --   opts.setup(stubs)   runs after install() and BEFORE the files load -- the place for
@@ -82,8 +97,11 @@ local ADDON_FILES = { "Core.lua", "Tooltip.lua", "Settings.lua" } -- TOC order
 --                       driven tests must also pass noPEW = true: the PLAYER_ENTERING_
 --                       WORLD scans would overwrite the seeded own-character snapshots
 --                       with the (empty) world model.
---   opts.files          override the loaded files (e.g. drop Settings.lua to exercise
---                       the nil-settings default display).
+--   opts.without        a set of TOC files to skip (e.g. { ["Settings.lua"] = true } to
+--                       exercise the nil-settings default display).
+--   opts.locale(ns)     runs once Locale.lua and the Locales/ files have loaded and
+--                       BEFORE any other file does -- the place to register a
+--                       translation, exactly where a real Locales/xxXX.lua would sit.
 --   opts.noAddonLoaded / opts.noPEW   skip the default lifecycle events.
 local function loadAddon(opts)
 	opts = opts or {}
@@ -93,8 +111,17 @@ local function loadAddon(opts)
 	if type(db) == "function" then db = db(stubs) end
 	_G.ExactItemCountDB = db
 	local ns = {}
-	for _, file in ipairs(opts.files or ADDON_FILES) do
-		assert(loadfile(root .. file))("ExactItemCount", ns)
+	local without = opts.without or {}
+	local localeHookRan = false
+	for _, file in ipairs(ADDON_FILES) do
+		if not without[file] then
+			if opts.locale and not localeHookRan and file ~= "Locale.lua"
+				and not file:find("^Locales/") then
+				localeHookRan = true
+				opts.locale(ns)
+			end
+			assert(loadfile(root .. file))("ExactItemCount", ns)
+		end
 	end
 	if not opts.noAddonLoaded then stubs.fire("ADDON_LOADED", "ExactItemCount") end
 	if not opts.noPEW then stubs.fire("PLAYER_ENTERING_WORLD") end
@@ -180,21 +207,23 @@ end
 -- rows under it (when rows rendered), and every suffixed line sums. A section can hold
 -- more than one scope -- a recipe renders its own "Total items owned:" lead plus a
 -- "Crafted items:" lead for the product, and auction listings add an "On auction:"
--- lead -- and rows always belong to the nearest lead above them. Returns the FIRST
--- lead's count (the hovered item's own total).
+-- lead -- and rows always belong to the nearest lead above them. Lines are classified
+-- by shape, never by their wording (so the invariant is checkable under any locale):
+-- the section's spacer is a lone space, breakdown rows are indented two spaces, and
+-- everything else is a lead. Returns the FIRST lead's count (the hovered item's own
+-- total).
 function H.assertSectionInvariant(tip)
 	local leads, rowSums, current = {}, {}, nil
 	for _, raw in ipairs(tip.lines) do
 		local s = H.strip(raw)
-		if s:find("^Total items owned:") or s:find("^Crafted items:")
-			or s:find("^On auction:") then
-			current = #leads + 1
-			leads[current] = raw
-		elseif s:find("^  ") then -- breakdown rows are indented two spaces
+		if s:find("^  ") then -- breakdown rows are indented two spaces
 			assertTrue(current, "breakdown row before any lead line: " .. s)
 			local count = H.parseLine(raw)
 			assertTrue(count, "row with no count: " .. s)
 			rowSums[current] = (rowSums[current] or 0) + count
+		elseif s ~= " " then
+			current = #leads + 1
+			leads[current] = raw
 		end
 		H.assertSuffixSums(raw)
 	end
@@ -367,9 +396,12 @@ local T = {
 	loadAddon = loadAddon,
 	stubs = stubs,
 	H = H,
+	root = root,              -- repo root (trailing separator), for specs that read source
+	addonFiles = ADDON_FILES, -- the TOC's load list, forward-slashed
 }
 
-for _, spec in ipairs({ "core_spec.lua", "settings_spec.lua", "tooltip_spec.lua", "find_spec.lua" }) do
+for _, spec in ipairs({ "core_spec.lua", "settings_spec.lua", "tooltip_spec.lua", "find_spec.lua",
+	"locale_spec.lua" }) do
 	assert(loadfile(here .. spec))(T)
 end
 

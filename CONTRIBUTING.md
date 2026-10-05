@@ -29,10 +29,11 @@ declined.
 2. Enable Lua error display in-game: `/console scriptErrors 1`.
 3. After editing files, `/reload` picks up the changes.
 
-Code conventions: the three Lua files share the private addon table via the
+Code conventions: the addon's Lua files share the private addon table via the
 `local addonName, ns = ...` vararg. Keep the data/presentation split — new data sources
 go in `Core.lua` behind the `ns.Get*` seams; `Tooltip.lua` reads only through those
-seams.
+seams. Display text never goes inline: every string the addon shows is a key in
+`Locales/enUS.lua`, read as `L.KEY` (DESIGN.md's Localization section has the rules).
 
 ## Static checks & automated tests
 
@@ -48,7 +49,8 @@ CI (`.github/workflows/ci.yml`) runs all three on every push and pull request.
 
 ### The test suite (`tests/`)
 
-The suite loads the real `Core.lua`, `Tooltip.lua` **and** `Settings.lua` against the
+The suite loads every file the TOC lists, in TOC order — the string table, `Core.lua`,
+`Tooltip.lua` **and** `Settings.lua` — against the
 WoW API stubs in `tests/wow_stubs.lua` (the Settings panel builds against a faked
 `Settings` API; its rendered UI is never asserted on) and drives them through the
 addon's own event handlers: scans run off fixture bags, banks, and worn gear; tooltips
@@ -94,12 +96,58 @@ are the DESIGN.md invariants:
   on their own disjoint lines; the search ignores the display tri-states but honors
   hidden characters; the `on auction` tail sums separately and appears only when
   non-zero; the length floor, result cap, sort order, and pipe-stripping of the echoed
-  query all hold.
+  query all hold;
+- the string table: every key the code reads is defined in `Locales/enUS.lua` and every
+  key defined there is read; with a stand-in translation loaded, every tooltip line,
+  chat line and options-panel string comes out translated (nothing hard-coded is left)
+  and the sum invariants still hold; the language shown follows an explicit choice,
+  then the client's language, then English, and `/eic locale` saves that choice for
+  the next load without switching anything live; a translation file may only register
+  the client language its file name says and assign existing keys, placeholders intact.
 
 The rule of thumb: **when you add or change data-layer or display behavior, add a
-test; when a claim needs the real client, add a checklist item below instead.** The
+test; when a claim needs the real client, add a checklist item below instead.** New
+display text means a new key in `Locales/enUS.lua` — the suite fails until some test
+actually displays it. The
 stubs can't model real panel rendering, atlas art, `RefreshData`'s actual pipeline,
 item-cache timing, or taint — that's what the in-game checklist is for.
+
+## Adding a translation
+
+Only English ships today, but every displayed string already comes from one table, so a
+translation needs no code changes:
+
+1. Copy `Locales/enUS.lua` to `Locales/xxXX.lua`, where `xxXX` is the client's locale
+   code (`deDE`, `frFR`, `ruRU`, `zhCN`, …). In the copy, change the one line that
+   registers the table so it names your language:
+
+   ```lua
+   local L = ns.NewLocale("xxXX")
+   ```
+
+   Two client codes that share a translation can be registered together:
+   `ns.NewLocale("esES", "esMX")`.
+
+2. Translate the values; never rename a key. Lines you leave out (or delete) simply
+   stay English, so a partial translation is fine.
+3. Keep every `%s` / `%d` placeholder. To reorder them, use the positional form
+   (`%2$d … %1$s`; the numbers are the English order). Where a count needs proper
+   plural forms, the game's own escape works inside a value: `%d |4match:matches;`.
+4. Save as UTF-8 without a BOM, one string per line.
+5. Add `Locales\xxXX.lua` to `ExactItemCount.toc`, on its own line after
+   `Locales\enUS.lua` (a comment marks the spot) and before `Core.lua`. The AddOns-list
+   text can be translated there too, with `## Title-xxXX:` and `## Notes-xxXX:` lines.
+6. Run `luajit tests/run_tests.lua` — it picks the new file up from the TOC and checks
+   that it only uses existing keys and keeps their placeholders.
+7. Try it in game: restart the client (a new file is not picked up by `/reload`). On a
+   client in that language it is shown automatically; on any other, `/eic locale xxXX`
+   and `/reload`. `/eic locale enUS` forces English on a translated client,
+   `/eic locale default` returns to the normal order (the client's language, falling
+   back to English), and bare `/eic locale` lists what is available.
+
+Not translated, on purpose: the addon's name, the `/eic` commands with their
+sub-command words (`find`, `locale`) and the locale command's own answers, and the
+upgrade-track badge letter, which is taken from the game's own localized text.
 
 ## In-game verification
 
@@ -309,6 +357,23 @@ Still to verify:*
       white name instead of a clickable link is expected there.)
 - [ ] Hide a character on the Characters page: its counts drop out of find results
       immediately.
+
+### String table
+
+- [ ] After a full client restart (a newly added file is not picked up by `/reload`):
+      hover an item, open the options panel and its Characters page, and run
+      `/eic find <something>`. All text reads as normal English. A Lua error about
+      indexing `L` or calling `NewLocale` (a nil value) means `Locale.lua` did not load
+      first — check the TOC lines; ALL_CAPS key names on screen (`LEAD_TOTAL: 5`) mean
+      `Locales\enUS.lua` did not load, or the code reads a key it doesn't define.
+- [ ] `/eic locale` lists `enUS | default`; `/eic locale enUS`, `/eic locale default`
+      and a made-up code each answer sensibly, and nothing changes on screen (only
+      English is registered). With a translation file added: `/eic locale <code>` +
+      `/reload` shows it everywhere, including the options panel, the Characters page
+      and the delete confirmation; `/eic locale default` + `/reload` returns to the
+      client's language.
+- [ ] **Saved data is untouched** by a language switch: counts, characters and
+      settings read the same before and after.
 
 ### Persistence lifecycle
 

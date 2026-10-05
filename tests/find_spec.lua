@@ -336,8 +336,8 @@ end)
 test("find_bare_find_prints_usage", function()
 	local _, S = boot()
 	run("find")
-	assertEq(#S.chatLines, 1)
-	assertTrue(chat(S)[1]:find("/eic find <name or item link>", 1, true))
+	assertEq(chat(S), { "Exact Item Count" .. DASH .. "/eic opens options" .. DOT
+		.. "/eic find <name or item link> searches your counts" })
 	assertEq(S.calls.openToCategory, 0)
 end)
 

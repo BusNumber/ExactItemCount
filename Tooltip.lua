@@ -1,5 +1,9 @@
 local addonName, ns = ...
 
+-- Every word this file displays comes from the string table (Locales/); what stays
+-- inline is the glue shared by all locales -- colors, parentheses, separators, colons.
+local L = ns.L
+
 -- Everything renders as single left-aligned AddLines: AddDoubleLine's right column sits
 -- wherever the widest Blizzard line pushed the tooltip edge, so the label-to-count gap
 -- would vary per item. Colors are applied per-segment with inline escape codes instead.
@@ -129,23 +133,23 @@ local function SourceSuffix(sources, opts)
 		parts[#parts + 1] = C(hex, text)
 	end
 	if sources.bags then
-		Add(SUFFIX_BAGS, "bags " .. tostring(sources.bags))
+		Add(SUFFIX_BAGS, L.SUFFIX_BAGS:format(sources.bags))
 	end
 	if opts.mergeBanks and sources.bank and sources.warband then
-		Add(SUFFIX, "banks " .. tostring(sources.bank + sources.warband))
+		Add(SUFFIX, L.SUFFIX_BANKS:format(sources.bank + sources.warband))
 	else
 		if sources.bank then
-			Add(SUFFIX, "bank " .. tostring(sources.bank))
+			Add(SUFFIX, L.SUFFIX_BANK:format(sources.bank))
 		end
 		if sources.warband then
-			Add(SUFFIX, "warband " .. tostring(sources.warband))
+			Add(SUFFIX, L.SUFFIX_WARBAND:format(sources.warband))
 		end
 	end
 	if sources.equipped then
-		Add(SUFFIX, "equipped " .. tostring(sources.equipped))
+		Add(SUFFIX, L.SUFFIX_EQUIPPED:format(sources.equipped))
 	end
 	if sources.mail then
-		Add(SUFFIX, "mail " .. tostring(sources.mail))
+		Add(SUFFIX, L.SUFFIX_MAIL:format(sources.mail))
 	end
 	-- The current character's own auction listings. Only auction-scope aggregates carry
 	-- this key (the scopes never mix -- see ForEachSourceStore), so the token appears
@@ -156,7 +160,7 @@ local function SourceSuffix(sources, opts)
 	-- restating each line would carry no information.) Base suffix color -- nothing
 	-- listed is "in hand", so no bags-style brightness.
 	if sources.auctions then
-		Add(SUFFIX, "yours " .. tostring(sources.auctions))
+		Add(SUFFIX, L.SUFFIX_YOURS:format(sources.auctions))
 	end
 	if sources.alts then
 		local names = {}
@@ -173,14 +177,14 @@ local function SourceSuffix(sources, opts)
 			for _, name in ipairs(names) do
 				sum = sum + sources.alts[name]
 			end
-			Add(SUFFIX, "alts " .. tostring(sum))
+			Add(SUFFIX, L.SUFFIX_ALTS_TOTAL:format(sum))
 		else
 			local named = #names
 			if opts.altsDetail == "topn" and opts.topN + 1 < #names then
 				named = opts.topN -- the tail is 2+ alts, worth collapsing
 			end
 			for i = 1, named do
-				Add(SUFFIX, names[i] .. " " .. tostring(sources.alts[names[i]]))
+				Add(SUFFIX, L.SUFFIX_ALT:format(names[i], sources.alts[names[i]]))
 			end
 			if named < #names then
 				local count, sum = 0, 0
@@ -188,7 +192,7 @@ local function SourceSuffix(sources, opts)
 					count = count + 1
 					sum = sum + sources.alts[names[j]]
 				end
-				Add(SUFFIX, "+" .. tostring(count) .. " alts " .. tostring(sum))
+				Add(SUFFIX, L.SUFFIX_ALTS_MORE:format(count, sum))
 			end
 		end
 	end
@@ -254,7 +258,7 @@ local function ShowGearBreakdown(tooltip, entry, link, hoveredTrack, opts, markO
 		elseif track then
 			label = C(labelColor, ilvl .. " (" .. TrackText(track) .. "):")
 		else
-			label = C(labelColor, "ilvl " .. ilvl .. ":")
+			label = C(labelColor, L.ROW_ILVL:format(ilvl) .. ":")
 		end
 		tooltip:AddLine("  " .. label .. " " .. C(countColor, tostring(count))
 			.. SourceSuffix(group and group.sources, opts))
@@ -507,7 +511,7 @@ local function OnItemTooltip(tooltip, data)
 
 	-- A zero total stands alone: every row under it would just restate the zero.
 	if showSelf then
-		AddLead(tooltip, "Total items owned", agg.total, LeadSuffix(agg, opts))
+		AddLead(tooltip, L.LEAD_TOTAL, agg.total, LeadSuffix(agg, opts))
 		if agg.total > 0 and showRows then
 			ShowBreakdownRows(tooltip, agg, hover, opts)
 		end
@@ -522,7 +526,7 @@ local function OnItemTooltip(tooltip, data)
 	-- and the lead alone names the scope's single possible location.
 	if showAuctions then
 		local auctionOpts = includeAlts and opts or { showSuffix = false }
-		AddLead(tooltip, "On auction", auctionAgg.total, LeadSuffix(auctionAgg, auctionOpts))
+		AddLead(tooltip, L.LEAD_AUCTION, auctionAgg.total, LeadSuffix(auctionAgg, auctionOpts))
 		if showRows then
 			ShowBreakdownRows(tooltip, auctionAgg,
 				{ link = hover.link, track = hover.track, markOnly = true }, auctionOpts)
@@ -534,7 +538,7 @@ local function OnItemTooltip(tooltip, data)
 	-- rendered by the same pipeline -- but with no hovered variant: nothing in it is
 	-- under the cursor, so no gold row and no synthetic owned-0 row.
 	if showProduct then
-		AddLead(tooltip, "Crafted items", productAgg.total, LeadSuffix(productAgg, opts))
+		AddLead(tooltip, L.LEAD_CRAFTED, productAgg.total, LeadSuffix(productAgg, opts))
 		if productAgg.total > 0 and showRows then
 			ShowBreakdownRows(tooltip, productAgg, nil, opts)
 		end
@@ -613,12 +617,12 @@ end
 local function AuctionTail(itemID, repLink, auctionFilter)
 	local agg = ComputeAggregate(itemID, repLink, auctionFilter)
 	if agg.total == 0 then return "" end
-	return C(DIM, EMDASH .. "on auction: ") .. C(WHITE, tostring(agg.total))
+	return C(DIM, EMDASH .. L.CHAT_ON_AUCTION .. ": ") .. C(WHITE, tostring(agg.total))
 		.. LeadSuffix(agg, CHAT_OPTS)
 end
 
 local function PrintUsage()
-	Chat(ChatHeader("/eic opens options \194\183 /eic find <name or item link> searches your counts"))
+	Chat(ChatHeader(L.CHAT_USAGE))
 end
 
 local function RunFind(rawQuery)
@@ -639,11 +643,11 @@ local function RunFind(rawQuery)
 
 	local q = SanitizeQuery(rawQuery)
 	if #q < FIND_MIN_QUERY then
-		Chat(ChatHeader("type at least " .. FIND_MIN_QUERY
-			.. " characters, or shift-click an item link."))
+		Chat(ChatHeader(L.CHAT_TOO_SHORT:format(FIND_MIN_QUERY)))
 		return
 	end
-	local needle = q:lower() -- ASCII-only folding; accepted, the addon is English-only
+	local needle = q:lower() -- ASCII-only folding: on a non-English client, names match
+	                         -- case-sensitively outside A-Z (known gap, see DESIGN.md)
 
 	-- The id universe: every owned store PLUS the auction stores -- an item that is
 	-- 100% listed must still match (owned-only would answer "no matches" while a stack
@@ -693,7 +697,7 @@ local function RunFind(rawQuery)
 
 	local found = #results
 	if found == 0 then
-		Chat(ChatHeader('no matches for "' .. q .. '" in your scanned items.'))
+		Chat(ChatHeader(L.CHAT_NO_MATCHES:format(q)))
 		return
 	end
 	table.sort(results, function(a, b)
@@ -703,8 +707,7 @@ local function RunFind(rawQuery)
 		return a.id < b.id -- namesakes: deterministic order
 	end)
 
-	Chat(ChatHeader(found .. (found == 1 and " match" or " matches")
-		.. ' for "' .. q .. '":'))
+	Chat(ChatHeader((found == 1 and L.CHAT_MATCH_ONE or L.CHAT_MATCH_MANY):format(found, q)))
 	for i = 1, math.min(found, FIND_MAX_RESULTS) do
 		local r = results[i]
 		-- A stored link renders itself (clickable, quality-colored -- never wrap it in
@@ -713,17 +716,50 @@ local function RunFind(rawQuery)
 			.. LeadSuffix(r.agg, CHAT_OPTS) .. AuctionTail(r.id, repLinks[r.id], auctionFilter))
 	end
 	if found > FIND_MAX_RESULTS then
-		Chat("  " .. C(DIM, "\226\128\166and " .. (found - FIND_MAX_RESULTS)
-			.. " more" .. EMDASH .. "try a more specific name."))
+		Chat("  " .. C(DIM, L.CHAT_MORE:format(found - FIND_MAX_RESULTS)))
 	end
+end
+
+-- `/eic locale`: which text language the addon shows -- a testing tool, there so a
+-- translation can be checked on any client. Bare, it lists the registered codes; a code
+-- (or "default": follow the game client again) is SAVED rather than applied live,
+-- because the options panel's labels are registered once -- the choice takes effect
+-- through a /reload. Its own lines are plain English on purpose, never read from the
+-- string table: this command is the way back from a language you cannot read.
+local function RunLocale(rest)
+	local codes = ns.GetLocaleCodes()
+	local choices = table.concat(codes, " | ") .. " | default"
+	local s = ns.GetSettings and ns.GetSettings()
+	if rest == "" or not s then
+		Chat(ChatHeader("locale: " .. choices .. "  (showing " .. ns.GetLocaleCode()
+			.. ", set to " .. (s and s.locale or "default") .. ")"))
+		return
+	end
+	local want = rest:lower() -- codes are matched case-insensitively
+	if want == "default" then
+		s.locale = nil
+		Chat(ChatHeader("locale: default (the game client's language). /reload to apply."))
+		return
+	end
+	for _, code in ipairs(codes) do
+		if code:lower() == want then
+			s.locale = code
+			Chat(ChatHeader("locale: " .. code .. ". /reload to apply."))
+			return
+		end
+	end
+	Chat(ChatHeader("locale: no translation '" .. SanitizeQuery(rest) .. "'. Available: " .. choices))
 end
 
 -- The slash router's seam: every non-empty /eic message lands here (Settings.lua owns
 -- only the empty-message panel-open). Unknown subcommands get the usage line.
 function ns.ChatCommand(msg)
 	local cmd, rest = msg:match("^(%S+)%s*(.-)%s*$")
-	if cmd and cmd:lower() == "find" and rest ~= "" then
+	cmd = cmd and cmd:lower()
+	if cmd == "find" and rest ~= "" then
 		RunFind(rest)
+	elseif cmd == "locale" then
+		RunLocale(rest)
 	else
 		PrintUsage()
 	end

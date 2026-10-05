@@ -21,13 +21,32 @@ local M = {}
 -- GetID, ...) without hand-writing dozens of stubs. Methods that must capture
 -- state (RegisterEvent/SetScript for the event bus) are set explicitly on the
 -- instance and therefore shadow the metatable.
+--
+-- One method is not a pure no-op: SetText records its text into M.ui, the capture of
+-- every display string the Settings panel and Characters page hand the UI (the
+-- explicit Settings stubs below feed the same list). Nothing asserts on the panel's
+-- English wording; the list exists so the locale tests can prove every one of those
+-- strings comes out of the string table.
 local widgetMeta
 local function Widget(t)
 	return setmetatable(t or {}, widgetMeta)
 end
+
+local function ui(text)
+	if type(text) == "string" then M.ui[#M.ui + 1] = text end
+end
+
 widgetMeta = {
 	__index = function(t, k)
-		local fn = function() return Widget() end
+		local fn
+		if k == "SetText" then
+			fn = function(_, text)
+				ui(text)
+				return Widget()
+			end
+		else
+			fn = function() return Widget() end
+		end
 		rawset(t, k, fn)
 		return fn
 	end,
@@ -38,6 +57,8 @@ local function resetState()
 	M.now = 1000              -- _G.time() clock
 	M.charName = "Tester"
 	M.realm = "TestRealm"     -- nil models pre-PLAYER_ENTERING_WORLD (charKey unresolvable)
+	M.locale = "enUS"         -- GetLocale(): the client's language. Locale.lua reads it once
+	                          -- at load, so set it in loadAddon's setup hook
 	M.metadata = { Version = "test" }
 	M.keys = { ALT = false, SHIFT = false, CTRL = false }
 	M.frames = {}             -- every mock frame CreateFrame returned (the event bus)
@@ -60,6 +81,9 @@ local function resetState()
 	M.calls = { bagTip = 0, invTip = 0, inboxTip = 0, sendTip = 0,
 		queryOwned = 0, checkInbox = 0, requestLoad = {}, openToCategory = 0 }
 	M.chatLines = {}          -- DEFAULT_CHAT_FRAME:AddMessage captures (chat output)
+	M.ui = {}                 -- every display string handed to the panel UI, in call order
+	M.optionGetters = {}      -- dropdown option getters, in registration order: they only
+	                          -- run when a dropdown opens, so tests call them to see labels
 	M.settingsRegistry = {}   -- [variable] = capture from Settings.Register*Setting
 	M.valueChangedCallbacks = {}
 	M.itemPostCall = nil      -- the tooltip post-call Tooltip.lua registered (test entry point)
@@ -216,6 +240,7 @@ function M.install()
 	resetState()
 
 	_G.time = function() return M.now end
+	_G.GetLocale = function() return M.locale end
 	_G.UnitName = function() return M.charName end
 	_G.GetNormalizedRealmName = function() return M.realm end
 
@@ -499,22 +524,63 @@ function M.install()
 		M.watched[name] = t
 		_G[name] = t
 	end
+	-- The Characters page's own hover tips write to GameTooltip: record what they show.
+	-- Explicit methods on the still-plain table, so RefreshData stays nil-able; Show is
+	-- a no-op that leaves `shown` alone (the watcher tests own that flag).
+	local gameTooltip = M.watched.GameTooltip
+	gameTooltip.SetOwner = function() end
+	gameTooltip.SetText = function(_, text) ui(text) end
+	gameTooltip.AddLine = function(_, text) ui(text) end
+	gameTooltip.Show = function() end
 
 	-- Settings API: explicit stubs where the shape matters (multi-returns, captures the
-	-- tests assert on), magic widgets for the rest of the panel build.
+	-- tests assert on, display strings recorded into M.ui), magic widgets for the rest
+	-- of the panel build.
 	_G.Settings = setmetatable({
 		VarType = { Boolean = "boolean" },
-		RegisterVerticalLayoutCategory = function()
+		RegisterVerticalLayoutCategory = function(name)
+			ui(name)
 			return Widget(), Widget() -- category, layout (magic __index can't multi-return)
 		end,
-		RegisterAddOnSetting = function(_, variable, key, tbl, varType, _, default)
+		RegisterAddOnSetting = function(_, variable, key, tbl, varType, name, default)
 			M.settingsRegistry[variable] = { key = key, tbl = tbl, varType = varType, default = default }
+			ui(name)
 			return Widget()
 		end,
-		RegisterProxySetting = function(_, variable, varType, _, default, getter, setter)
+		RegisterProxySetting = function(_, variable, varType, name, default, getter, setter)
 			M.settingsRegistry[variable] =
 				{ proxy = true, varType = varType, default = default, getter = getter, setter = setter }
+			ui(name)
 			return Widget()
+		end,
+		CreateDropdown = function(_, _, optionsGetter, tooltip)
+			M.optionGetters[#M.optionGetters + 1] = optionsGetter
+			ui(tooltip)
+			return Widget()
+		end,
+		CreateCheckbox = function(_, _, tooltip)
+			ui(tooltip)
+			return Widget()
+		end,
+		CreateSlider = function(_, _, _, tooltip)
+			ui(tooltip)
+			return Widget()
+		end,
+		RegisterCanvasLayoutSubcategory = function(_, _, name)
+			ui(name)
+			return Widget()
+		end,
+		-- The dropdown option list: Add(value, label) records the label; GetData returns
+		-- the { value, label } rows so a test can read one getter's options directly.
+		CreateControlTextContainer = function()
+			local data = {}
+			return {
+				Add = function(_, value, label)
+					data[#data + 1] = { value = value, label = label }
+					ui(label)
+				end,
+				GetData = function() return data end,
+			}
 		end,
 		SetOnValueChangedCallback = function(variable, cb)
 			M.valueChangedCallbacks[variable] = cb
@@ -525,7 +591,10 @@ function M.install()
 			M.calls.openToCategory = M.calls.openToCategory + 1
 		end,
 	}, widgetMeta)
-	_G.CreateSettingsListSectionHeaderInitializer = function(text) return { header = text } end
+	_G.CreateSettingsListSectionHeaderInitializer = function(text)
+		ui(text)
+		return { header = text }
+	end
 	_G.MinimalSliderWithSteppersMixin = { Label = { Right = 4 } }
 	_G.StaticPopupDialogs = {}
 	_G.SlashCmdList = {}
@@ -533,7 +602,14 @@ function M.install()
 	_G.DEFAULT_CHAT_FRAME = {
 		AddMessage = function(_, text) M.chatLines[#M.chatLines + 1] = text end,
 	}
-	_G.StaticPopup_Show = function() end
+	-- Records the prompt the way the client would show it: the dialog's text formatted
+	-- with text_arg1.
+	_G.StaticPopup_Show = function(which, textArg1)
+		local dialog = _G.StaticPopupDialogs[which]
+		if dialog and type(dialog.text) == "string" then
+			ui(dialog.text:format(textArg1))
+		end
+	end
 	_G.GameTooltip_Hide = function() end
 	_G.DELETE = "Delete"
 	_G.CANCEL = "Cancel"
