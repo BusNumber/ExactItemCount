@@ -154,6 +154,19 @@ upgrade-track badge letter, which is taken from the game's own localized text.
 The addon can only be truly verified in-game. Before submitting display or data-layer
 changes, run through the checks relevant to what you touched:
 
+### After a game-patch bump
+
+A smoke pass for a release whose only change is the TOC's `## Interface` line, and for
+the first login after any patch:
+
+- [ ] On every client version the TOC lists, the AddOns list shows the addon without
+      the "out of date" tag, and login produces no Lua error (`/console scriptErrors 1`).
+- [ ] Hover a crafted piece and a two-tier reagent: the rows render, the quality star
+      atlases are not blank, and the AddOns-list icon draws.
+- [ ] Open the bank, a mailbox and the auction house once each: no errors, and the
+      Characters page's scan ages update.
+- [ ] `/eic` opens the panel, the Characters page draws, and `/eic find <name>` prints.
+
 ### Core acceptance test — crafted gear ranks
 
 The reason this addon exists:

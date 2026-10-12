@@ -999,6 +999,17 @@ a given line of code looks the way it does.
   health/power/cooldowns/auras on tainted paths — **not** bag/container reads.
   `C_Container.GetContainerItemInfo` is `AllowedWhenUntainted`, so this addon is
   unaffected. No taint risk here (reads + `tooltip:AddLine` only).
+- **The bare item globals are gone (12.1.5).** `Blizzard_DeprecatedItemScript` — the
+  shim that had kept `GetItemInfo`, `GetItemInfoInstant`, `GetDetailedItemLevelInfo`,
+  `GetItemCount`, `GetItemQualityColor`, `IsEquippableItem` and some forty siblings
+  alive as aliases since their 11.0 move into `C_Item` — was removed in 12.1.5 along
+  with the currency and socket shims, so on that client those names are plain nil.
+  Every item call here goes through `C_Item.*`; the same-named locals at the top of
+  `Core.lua` / `Tooltip.lua` are `local GetItemInfo = C_Item.GetItemInfo`-style
+  aliases, never the globals. The mail globals (`GetInboxItem`, `CheckInbox`, …) and
+  `GetInventoryItemID`/`GetInventoryItemLink` were never shimmed — they are native and
+  stay. `.luacheckrc` deliberately omits the bare item names so a regression fails CI
+  rather than in-game.
 - **Tooltip text**: everything is a single left-aligned `AddLine` per row; per-segment
   colors via inline `|cffRRGGBB…|r` escapes (atlas icon markup renders its own art and
   is unaffected by surrounding color codes). Counts go through `tostring`. Palette
@@ -1068,4 +1079,7 @@ These plug in behind the existing seams without changing the tooltip layer:
   modifier change.
 - Translations: the string layer is in place (see [Localization](#localization)) but
   only English ships. A language is one `Locales/xxXX.lua` file; a UTF-8-aware case
-  fold for `/eic find` should arrive with the first one.
+  fold for `/eic find` should arrive with the first one — `C_Intl.FoldCase` (added in
+  12.1.5: locale-independent UTF-8 case folding, callable from tainted code) is the
+  candidate, behind a `string.lower` fallback for as long as a 12.1.0 client can load
+  the addon.

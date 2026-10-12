@@ -5,6 +5,10 @@ All notable changes to Exact Item Count are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-10-12
+
+Compatibility release for patch 12.1.5.
+
 ## [1.6.1] - 2026-10-04
 
 ### Changed
@@ -136,6 +140,7 @@ Initial public release. For **Midnight, patch 12.0.5** (retail).
 - **Live tooltip refresh** — holding or releasing the modifier key over an open tooltip
   updates the counts in place.
 
+[1.6.2]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.6.2
 [1.6.1]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.6.1
 [1.6.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.6.0
 [1.5.0]: https://github.com/BusNumber/ExactItemCount/releases/tag/v1.5.0

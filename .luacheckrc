@@ -34,6 +34,10 @@ read_globals = {
 	"C_Mail",
 	"C_TooltipInfo",
 	"C_TradeSkillUI",
+	-- The bare item/currency globals (GetItemInfo, GetItemInfoInstant, GetItemCount,
+	-- GetDetailedItemLevelInfo, GetCoinTextureString, ...) are deliberately absent:
+	-- patch 12.1.5 removed their deprecation shims, so the only spelling that exists
+	-- in-game is C_Item.* / C_CurrencyInfo.*. Fix the call site; don't add them here.
 
 	-- frames, mixins, UI utilities
 	"CreateAtlasMarkup",

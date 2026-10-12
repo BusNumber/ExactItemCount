@@ -2,8 +2,6 @@
 
 A lightweight World of Warcraft addon that tells you **how many of an item you own — broken down by item level and crafting quality** — right in the item tooltip.
 
-> Currently, for **Midnight, patch 12.1.0** (retail) only.
-
 ## Why
 
 Most "how many do I have?" addons count purely by item. But crafted profession gear's R1–R5 ranks are all the **same item at different item levels**, so a plain count of "2" can't tell you whether those are the **R5** you're about to craft or a different rank sitting in your bags.
