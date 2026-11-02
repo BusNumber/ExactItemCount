@@ -30,6 +30,7 @@ read_globals = {
 	"C_AuctionHouse",
 	"C_Bank",
 	"C_Container",
+	"C_Intl",                 -- FoldCase: UTF-8 case folding (12.1.5+)
 	"C_Item",
 	"C_Mail",
 	"C_TooltipInfo",

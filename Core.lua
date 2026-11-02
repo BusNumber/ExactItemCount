@@ -104,6 +104,7 @@ local GetSendMailItemLink     = GetSendMailItemLink
 local CanCheckInbox           = C_Mail and C_Mail.CanCheckInbox
 local GetInboxItemTooltip     = C_TooltipInfo and C_TooltipInfo.GetInboxItem
 local GetSendMailItemTooltip  = C_TooltipInfo and C_TooltipInfo.GetSendMailItem
+local FoldCase                = C_Intl and C_Intl.FoldCase -- 12.1.5+: UTF-8 case folding
 
 -- Non-active listings (sold, awaiting collection) are excluded from the auction scan:
 -- the item is gone, its proceeds arrive as gold via mail. An absent status field must
@@ -141,6 +142,15 @@ local NON_GEAR_EQUIP_LOCS = {
 
 function ns.IsGearEquipLoc(equipLoc)
 	return equipLoc ~= nil and not NON_GEAR_EQUIP_LOCS[equipLoc]
+end
+
+-- The one case-fold rule, shared by the chat search and the mail-recipient match so the
+-- two can never disagree on which letters are "the same". C_Intl.FoldCase folds all of
+-- UTF-8 (locale-independent, callable from tainted code); string.lower is the fallback
+-- when the API is absent or returns nothing (it is documented MayReturnNothing), and
+-- folds ASCII only.
+function ns.FoldCase(s)
+	return (FoldCase and FoldCase(s)) or s:lower()
 end
 
 -- Upgrade-track tooltip line ("Upgrade Level: Hero 1/6"). There is no structured API for
@@ -289,7 +299,8 @@ end
 -- Resolves a player-typed or API-supplied character name ("liara", "Liara-RealmA",
 -- "Liara-Realm A") to the exact db.chars key it denotes, or nil for a stranger. No realm
 -- means the own realm; a typed realm is normalized the way GetNormalizedRealmName is
--- (spaces/hyphens/apostrophes stripped); the match is case-insensitive. Character names
+-- (spaces/hyphens/apostrophes stripped); the match is case-insensitive (ns.FoldCase, a
+-- UTF-8 fold, so a lowercase non-ASCII initial still matches). Character names
 -- cannot contain "-", so the split at the first hyphen is exact. Only ever RETURNS
 -- existing keys -- the send-crediting path relies on that (it never creates entries).
 -- The pairs() sweep is one pass over a tiny roster, once per send / COD header.
@@ -303,9 +314,9 @@ local function KnownCharKey(who)
 		realm = GetNormalizedRealmName()
 		if not realm then return nil end
 	end
-	local target = (name .. "-" .. realm):lower()
+	local target = ns.FoldCase(name .. "-" .. realm)
 	for key in pairs(db.chars) do
-		if key:lower() == target then return key end
+		if ns.FoldCase(key) == target then return key end
 	end
 	return nil
 end

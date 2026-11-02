@@ -174,6 +174,41 @@ test("find_text_case_insensitive_keyword_and_query", function()
 	assertEq(S.calls.openToCategory, 0)
 end)
 
+test("find_text_case_fold_is_utf8", function()
+	-- The fold goes through C_Intl.FoldCase (ns.FoldCase), so letters outside A-Z match
+	-- regardless of case -- string.lower would leave "Ä" / "Э" unmatched by their
+	-- lowercase queries. Exact-match-first sorting holds on the folded names too.
+	local _, S = loadAddon({ noPEW = true, db = function(S)
+		S.defineItem(601, { name = "Ätherstaub" })
+		S.defineItem(602, { name = "Ätherstaub Phiole" })
+		S.defineItem(603, { name = "Эссенция" })
+		return H.db({ chars = { [H.OWN] = H.charStore({ bags = H.dbItems({
+			{ id = 601, count = 2, link = S.link(601, "a") },
+			{ id = 602, count = 5, link = S.link(602, "p") },
+			{ id = 603, count = 1, link = S.link(603, "e") },
+		}) }) } })
+	end })
+	run("find ätherstaub")
+	assertEq(chat(S), {
+		"Exact Item Count" .. DASH .. '2 matches for "ätherstaub":',
+		"  [Ätherstaub]: 2 (bags 2)",
+		"  [Ätherstaub Phiole]: 5 (bags 5)",
+	})
+	S.chatLines = {}
+	run("find эссенция")
+	assertEq(chat(S)[2], "  [Эссенция]: 1 (bags 1)")
+end)
+
+test("find_text_case_fold_falls_back_to_lower_without_C_Intl", function()
+	-- With the API absent (a client without C_Intl), ns.FoldCase's string.lower
+	-- fallback still folds ASCII, so the keyword and query stay case-insensitive.
+	local _, S = loadAddon({ noPEW = true,
+		setup = function() _G.C_Intl = nil end,
+		db = function(S) return findWorld(S) end })
+	run("FIND STORMH")
+	assertEq(H.assertFindOutput(S.chatLines), 3)
+end)
+
 test("find_text_magic_chars_literal", function()
 	local _, S = boot()
 	run("find %s(") -- Lua pattern magic must be inert (plain substring match)

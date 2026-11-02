@@ -501,6 +501,16 @@ function M.install()
 		GetAddOnMetadata = function(_, field) return M.metadata[field] end,
 	}
 
+	-- UTF-8 case folding (12.1.5+). The real API folds all of Unicode; the stub folds
+	-- ASCII plus the few non-ASCII capitals the specs use, enough to tell the API path
+	-- from a string.lower fallback (which leaves bytes above 127 alone).
+	local FOLD = { ["Ä"] = "ä", ["Ö"] = "ö", ["Ü"] = "ü", ["É"] = "é", ["Э"] = "э" }
+	_G.C_Intl = {
+		FoldCase = function(text)
+			return (text:lower():gsub("[\195\208][\128-\191]", FOLD))
+		end,
+	}
+
 	-- Deterministic atlas markup so tier icons are assertable as readable substrings.
 	_G.CreateAtlasMarkup = function(atlas) return "{" .. atlas .. "}" end
 

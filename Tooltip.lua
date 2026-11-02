@@ -646,8 +646,8 @@ local function RunFind(rawQuery)
 		Chat(ChatHeader(L.CHAT_TOO_SHORT:format(FIND_MIN_QUERY)))
 		return
 	end
-	local needle = q:lower() -- ASCII-only folding: on a non-English client, names match
-	                         -- case-sensitively outside A-Z (known gap, see DESIGN.md)
+	local needle = ns.FoldCase(q) -- UTF-8 case fold (C_Intl.FoldCase, string.lower as the
+	                              -- fallback): accented and non-Latin letters match too
 
 	-- The id universe: every owned store PLUS the auction stores -- an item that is
 	-- 100% listed must still match (owned-only would answer "no matches" while a stack
@@ -679,7 +679,8 @@ local function RunFind(rawQuery)
 	for _, id in ipairs(sorted) do
 		if not consumed[id] then
 			local name = ns.ItemName(id, repLinks[id])
-			if name and name:lower():find(needle, 1, true) then
+			local folded = name and ns.FoldCase(name)
+			if folded and folded:find(needle, 1, true) then
 				local agg = ComputeAggregate(id, repLinks[id], ownedFilter)
 				if agg.tier then
 					consumed[id] = true
@@ -689,7 +690,7 @@ local function RunFind(rawQuery)
 				end
 				results[#results + 1] = {
 					id = id, name = name, link = repLinks[id], agg = agg,
-					exact = name:lower() == needle,
+					exact = folded == needle,
 				}
 			end
 		end

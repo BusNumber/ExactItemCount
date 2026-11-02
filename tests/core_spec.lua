@@ -519,6 +519,24 @@ end)
 
 -- ---------------------------------------------------------------- send crediting
 
+test("send_credit_recipient_matched_by_utf8_fold", function()
+	-- The recipient match folds case the way the chat search does (ns.FoldCase ->
+	-- C_Intl.FoldCase): a name typed with a lowercase non-ASCII initial still resolves
+	-- to the stored key, so the credit lands where string.lower would have missed.
+	local _, S = loadAddon({ db = function(S)
+		S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })
+		return H.db({ chars = { ["Élise-TestRealm"] = H.charStore({}) } })
+	end })
+	S.fire("MAIL_SHOW")
+	S.setSendSlot(1, { id = 101, count = 1, ilvl = 658 })
+	S.fire("MAIL_SEND_INFO_UPDATE")
+	_G.SendMail("élise", "goods", "")
+	S.fire("MAIL_SEND_SUCCESS")
+	local pending = _G.ExactItemCountDB.chars["Élise-TestRealm"].mailPending
+	assertEq(#pending, 1)
+	assertEq(pending[1].items[101].total, 1)
+end)
+
 test("send_credit_commit_on_success", function()
 	local _, S = loadAddon({ db = function(S)
 		S.defineItem(101, { name = "Forged Chest", equipLoc = "INVTYPE_CHEST" })

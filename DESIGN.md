@@ -266,7 +266,8 @@ Two stores feed the one number:
   then. The prune is the only healer a credit has when its recipient never opens a
   mailbox with the addon running (played on another PC, or parked). Only recipients
   that normalize to an existing character key are credited (bare name = own realm; a
-  typed realm normalizes the way `GetNormalizedRealmName` does; case-insensitive) —
+  typed realm normalizes the way `GetNormalizedRealmName` does; case-insensitive through
+  the UTF-8 fold `ns.FoldCase`, so a lowercase non-ASCII initial still matches) —
   mail to anyone else is a gift leaving your ownership, correctly counted nowhere.
 - **Auction-house credits** (same store, other writers) — buying from the AH and
   cancelling an own listing both put goods in transit by mail, so each **finalized**
@@ -504,9 +505,11 @@ otherwise.
   `[Name]` unwraps), so a pasted or mangled link can't corrupt chat rendering or fake
   a hyperlink mid-line. `C_StringUtil.StripHyperlinks` (added 12.0) is the official
   near-equivalent; the explicit gsub chain stays byte-deterministic for the headless
-  suite. Case folding is `string.lower` — ASCII-only, so on a non-English client item
-  names match case-sensitively outside A–Z. Accepted while only English ships; a
-  UTF-8-aware fold belongs with the first translation.
+  suite. Case folding is `ns.FoldCase` — `C_Intl.FoldCase` (12.1.5+: locale-independent
+  UTF-8 case folding, callable from tainted code) over both the query and every
+  candidate name, so accented and non-Latin letters match regardless of case on any
+  client; `string.lower` is the fallback when the API is absent or returns nothing (it
+  is documented `MayReturnNothing`). The same seam folds the mail recipient match.
 
 ## Architecture
 
@@ -525,7 +528,7 @@ String layer, the base locale: registers `enUS` and defines every key. A transla
 
 ### Core.lua
 
-Data layer: SavedVariables DB + container scans + events + aggregation. Owns `ns.Get`, `ns.GetByName`, `ns.CollectItemIDs`, `ns.ItemName`, `ns.GetCharKey`, `ns.DeleteChar`, plus the shared helpers `ns.IsGearEquipLoc`, `ns.ParseUpgradeTrack`.
+Data layer: SavedVariables DB + container scans + events + aggregation. Owns `ns.Get`, `ns.GetByName`, `ns.CollectItemIDs`, `ns.ItemName`, `ns.GetCharKey`, `ns.DeleteChar`, plus the shared helpers `ns.IsGearEquipLoc`, `ns.ParseUpgradeTrack`, `ns.FoldCase`.
 
 ### Tooltip.lua
 
@@ -662,6 +665,10 @@ buy invalidation bugs.
   first (the session cache), the link's bracket name as the cold-cache fallback — the
   one name-resolution rule, shared by the sibling join and the chat search so the two
   can never disagree on what an id is called.
+- `ns.FoldCase(s)` → the one case-fold rule: `C_Intl.FoldCase` (UTF-8,
+  locale-independent) with `string.lower` as the fallback when the API is absent or
+  returns nothing — shared by the chat search (query and candidate names alike) and the
+  mail recipient match, so the two can never disagree on which letters are "the same".
 - `ns.ChatCommand(msg)` (presentation layer, `Tooltip.lua`) → handles every non-empty
   `/eic` message; see [The `/eic find` chat command](#the-eic-find-chat-command).
 - `filter` (optional, nil = everything):
@@ -890,7 +897,8 @@ a given line of code looks the way it does.
   discipline.
 - **The inbox is paged and capped at 100.** `GetInboxNumItems()` returns `(numItems,
   totalItems)` — *downloaded/indexable* vs *server-side total*. (The wiki describes
-  `totalItems` as "capacity"; Blizzard's own `InboxFrame_Update` proves otherwise,
+  `totalItems` as "capacity"; Blizzard's own `InboxFrame_Update` (12.1.7:
+  `InboxMixin:Update`) proves otherwise,
   treating `totalItems - numItems` as overflow against `MAX_INBOX_SIZE = 100`.)
   Indexing only ever reaches `1..numItems`, so a scan while `totalItems > numItems`
   would silently undercount — the `ReadableInboxCount` guard keeps the stored snapshot
@@ -901,8 +909,9 @@ a given line of code looks the way it does.
   right after opening, `GetInboxNumItems` can legitimately read `(0, 0)` before data
   arrives, and an immediate scan would swap in a false empty (the AH SHOW→UPDATED
   pattern). `CheckInbox()` is server-throttled — gate it on `C_Mail.CanCheckInbox()`;
-  no retry timer, Blizzard's `MailFrame_RefreshInbox` queues its own and the scan
-  rides the eventual update.
+  no retry timer, Blizzard's `MailFrame_RefreshInbox` (12.1.7 moved the mail frame onto
+  mixins — `MailMixin:RefreshInbox`, same throttle-and-retry loop) queues its own and
+  the scan rides the eventual update.
 - **`GetInboxItem`'s quality return is a long-documented bug (always -1)** — never read
   it; quality resolves from the link like everywhere else. `ATTACHMENTS_MAX_RECEIVE`
   (16) / `ATTACHMENTS_MAX_SEND` (12) are **Lua globals defined in Blizzard_MailFrame**,
@@ -982,11 +991,13 @@ a given line of code looks the way it does.
   is an undercount the inbox scan heals.
 - **Bag iteration**: bags are `Enum.BagIndex.Backpack` (0) …
   `Enum.BagIndex.ReagentBag` (5), contiguous. Bank tabs post-11.2 rework: character
-  `Enum.BagIndex.CharacterBankTab_1..6` (6–11), warband `AccountBankTab_1..5` (12–16) —
-  but **don't hardcode the ranges**;
+  `Enum.BagIndex.CharacterBankTab_1..6` (6–11), warband `AccountBankTab_1..5` (12–16)
+  through 12.1.5 — and **12.1.7 moved them**: nine tabs per bank type, character tabs
+  7–9 at 12–14 and `AccountBankTab_1..9` at 15–23 (`C_Bank.FetchMaxNumBankTabs` arrived
+  alongside). Exactly why the ranges are **never hardcoded**:
   `C_Bank.FetchPurchasedBankTabIDs(Enum.BankType.Character|Account)` returns the
-  purchased tabs' bag IDs. Legacy `Bank` (-1) / `Bankbag_*` / `Reagentbank` (-3)
-  indices are **gone**.
+  purchased tabs' bag IDs, whatever they are on the running client. Legacy `Bank` (-1) /
+  `Bankbag_*` / `Reagentbank` (-3) indices are **gone**.
 - **Character DB key** is `UnitName("player") .. "-" .. GetNormalizedRealmName()`,
   resolved **lazily at first scan**: the normalized realm is reliable from
   `PLAYER_ENTERING_WORLD` on, **not** at `ADDON_LOADED`, and `BAG_UPDATE_DELAYED` can
@@ -1078,8 +1089,14 @@ These plug in behind the existing seams without changing the tooltip layer:
   a config-off extra); live re-label of the closed "[modifier] held" dropdowns after a
   modifier change.
 - Translations: the string layer is in place (see [Localization](#localization)) but
-  only English ships. A language is one `Locales/xxXX.lua` file; a UTF-8-aware case
-  fold for `/eic find` should arrive with the first one — `C_Intl.FoldCase` (added in
-  12.1.5: locale-independent UTF-8 case folding, callable from tainted code) is the
-  candidate, behind a `string.lower` fallback for as long as a 12.1.0 client can load
-  the addon.
+  only English ships. A language is one `Locales/xxXX.lua` file. The `/eic find` case
+  fold is already UTF-8-aware (`ns.FoldCase`); the remaining `C_Intl` candidates for a
+  first translation are `C_Intl.CompareStrings` (a locale-aware result sort) and
+  `C_Intl.FindStringMatches` (collation-strength matching, e.g. accent-insensitive
+  search) — both unverified in-game.
+- Commodity listing links: the owned-auctions scan stores commodity listings linkless
+  (the API gives none), so their tier resolves only from the item cache and `/eic find`
+  prints a plain name for them. `C_AuctionHouse.GetItemKeySampleLink(itemKey)` (12.1.7,
+  `MayReturnNothing`) returns a sample link for an item key; if it answers for an owned
+  listing's key outside a browse query (in-game check pending), the scan could store
+  it — behind a nil guard for as long as 12.1.5 is supported.
